@@ -2,6 +2,7 @@ import { buildRuntimeStateRequestScopes } from './runtimeInstance.controller.js'
 import { inspectIsolatedSyntheticOutcome, planIsolatedSyntheticOutcome, confirmIsolatedSyntheticOutcomePlan,
   executeIsolatedSyntheticOutcome } from '../services/isolatedSyntheticOutcomeService.js'
 import { completeIsolatedSyntheticOutcome, readLatestIsolatedSyntheticOutcome } from '../services/isolatedSyntheticOutcomeCompletionService.js'
+import { readOutcomeDocxRenditionSource } from '../services/outcomeDocxRenditionSourceService.js'
 
 const handle = operation => async (req, res, next) => {
   try {
@@ -20,4 +21,5 @@ export const planIsolatedSyntheticOutcomeEndpoint = handle(planIsolatedSynthetic
 export const confirmIsolatedSyntheticOutcomePlanEndpoint = handle(confirmIsolatedSyntheticOutcomePlan)
 export const executeIsolatedSyntheticOutcomeEndpoint = handle(executeIsolatedSyntheticOutcome)
 export const readIsolatedSyntheticOutcomeEndpoint = handle(readLatestIsolatedSyntheticOutcome)
+export const readOutcomeDocxRenditionSourceEndpoint = handle(readOutcomeDocxRenditionSource)
 export const completeIsolatedSyntheticOutcomeEndpoint = handle(completeIsolatedSyntheticOutcome)

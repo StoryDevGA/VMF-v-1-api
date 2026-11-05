@@ -6,6 +6,8 @@ import logger from '../config/logger.js'
 import {
   PROFESSIONAL_DOCUMENT_CANDIDATE_ERROR_CODES,
   PROFESSIONAL_DOCUMENT_CANDIDATE_PROFILE,
+  PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES,
+  PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES,
   renderProfessionalDocumentCandidate,
   validateProfessionalDocumentCandidatePackage,
 } from '../services/professionalDocumentCandidateRenderer.js'
@@ -21,6 +23,82 @@ const metadata = {
   versionNumber: 2,
   status: 'APPROVED',
 }
+
+test('source-scoped layout preserves evidence groups and upright quotations without changing old layout', async () => {
+  const markdown = ['# Executive Growth Decision', '# 7. Value and economic pathways',
+    '## The source limits the benefit claim.', 'A proposal is not a measured outcome.',
+    '**Source: controlled source**', '> No measured benefit is evidenced.',
+    '**Intake: Target offer**', '- Proposed trial', '# 13. Next legal downstream action',
+    '## Recorded question and review context', '**Source statement about permission**',
+    '**Source: controlled source**', '> This source does not authorise execution.',
+    'These three quoted statements must not be read as granting permission.',
+  ].join('\n\n')
+  const options = { documentMetadata: metadata, markdown,
+    presentationProfile: PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES.CUSTOMER }
+  const xmlOf = async result => (await JSZip.loadAsync(result.buffer)).file('word/document.xml').async('string')
+  const xml = await xmlOf(await renderProfessionalDocumentCandidate({ ...options,
+    layoutProfile: PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.SOURCE_SCOPED_QUOTATIONS }))
+  const paragraphs = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(match => match[0])
+  for (const text of ['7. Value', 'The source limits', 'A proposal', 'Source: controlled', 'Intake: Target',
+    'This source does not authorise']) {
+    expect(paragraphs.find(p => p.includes(text))).toContain('<w:keepNext/>')
+  }
+  expect(xml).not.toContain('<w:pStyle w:val="CandidateEyebrow"/>')
+  expect(paragraphs.find(p => p.includes('No measured benefit'))).not.toContain('<w:i/>')
+  expect(paragraphs.find(p => p.includes('No measured benefit'))).toContain('<w:keepLines/>')
+  expect(xml).toContain('Recorded question and review context')
+  const oldXml = await xmlOf(await renderProfessionalDocumentCandidate({ ...options,
+    layoutProfile: PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.ATTRIBUTED_QUOTATIONS }))
+  const oldParagraphs = [...oldXml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(match => match[0])
+  expect(oldXml).toContain('<w:pStyle w:val="CandidateEyebrow"/>')
+  expect(oldParagraphs.find(p => p.includes('No measured benefit'))).toContain('<w:i/>')
+  expect(oldParagraphs.find(p => p.includes('A proposal'))).not.toContain('<w:keepNext/>')
+})
+
+test('customer presentation omits generated workflow chrome and engineering properties while preserving source prose', async () => {
+  const options = { documentMetadata: { ...metadata, status: 'DRAFT' },
+    markdown: '# Executive Growth Decision\n\nSource says DRAFT is a quoted term.' }
+  const legacy = await renderProfessionalDocumentCandidate(options)
+  const explicit = await renderProfessionalDocumentCandidate({ ...options,
+    presentationProfile: PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES.ENGINEERING })
+  expect(explicit.buffer.equals(legacy.buffer)).toBe(true)
+  const customer = await renderProfessionalDocumentCandidate({ ...options,
+    presentationProfile: PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES.CUSTOMER })
+  const zip = await JSZip.loadAsync(customer.buffer)
+  const xml = await zip.file('word/document.xml').async('string')
+  expect(xml).toContain('Source says DRAFT is a quoted term.')
+  expect(xml).not.toContain('Version 2 | DRAFT')
+  const footer = await zip.file('word/footer1.xml').async('string')
+  expect(footer).toContain('Executive Brief | Page ')
+  expect(footer).not.toContain('DRAFT')
+  const core = await zip.file('docProps/core.xml').async('string')
+  expect(core).toContain('StoryLineOS')
+  expect(core).not.toContain('Engineering')
+  expect(core).not.toContain('approval')
+  await expect(renderProfessionalDocumentCandidate({ ...options, presentationProfile: 'UNKNOWN' }))
+    .rejects.toMatchObject({ reason: 'PRESENTATION_PROFILE_UNSUPPORTED' })
+})
+
+test('versioned quotation layout keeps only standalone bold labels with following quotes', async () => {
+  const markdown = '# Executive Growth Decision\n\n**Attribution label**\n\n> Attributed quotation.\n\nNarrative paragraph.\n\n> Another quotation.\n\n**Unrelated label**\n\nOrdinary prose.'
+  const readParagraphs = async result => {
+    const zip = await JSZip.loadAsync(result.buffer)
+    const xml = await zip.file('word/document.xml').async('string')
+    return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(match => match[0])
+  }
+  const options = { documentMetadata: metadata, markdown }
+  const optedIn = await readParagraphs(await renderProfessionalDocumentCandidate({ ...options,
+    layoutProfile: PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.ATTRIBUTED_QUOTATIONS }))
+  expect(optedIn.find(p => p.includes('Attribution label'))).toContain('<w:keepNext/>')
+  expect(optedIn.find(p => p.includes('Narrative paragraph.'))).not.toContain('keepNext')
+  expect(optedIn.find(p => p.includes('Unrelated label'))).not.toContain('keepNext')
+  const legacy = await renderProfessionalDocumentCandidate(options)
+  const explicitLegacy = await renderProfessionalDocumentCandidate({ ...options, layoutProfile: PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.STANDARD })
+  expect(explicitLegacy.buffer.equals(legacy.buffer)).toBe(true)
+  expect((await readParagraphs(legacy)).find(p => p.includes('Attribution label'))).not.toContain('keepNext')
+  await expect(renderProfessionalDocumentCandidate({ ...options, layoutProfile: 'UNRECOGNISED' }))
+    .rejects.toMatchObject({ reason: 'LAYOUT_PROFILE_UNSUPPORTED' })
+})
 
 const representativeMarkdown = `# Executive Growth Decision
 

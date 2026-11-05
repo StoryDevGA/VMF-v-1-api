@@ -14,6 +14,16 @@ afterEach(() => {
 })
 
 describe('env governance rollout flags', () => {
+  test('narrow document flag defaults false and accepts only canonical boolean configuration', async () => {
+    process.env = { ...ORIGINAL_ENV, NODE_ENV: 'test', CONTROLLED_DOCX_READ_NARROW_ENABLED: undefined }
+    expect((await loadEnv()).controlledDocxReadNarrowEnabled).toBe(false)
+    process.env.CONTROLLED_DOCX_READ_NARROW_ENABLED = 'true'
+    expect((await loadEnv()).controlledDocxReadNarrowEnabled).toBe(true)
+    process.env.CONTROLLED_DOCX_READ_NARROW_ENABLED = 'false'
+    expect((await loadEnv()).controlledDocxReadNarrowEnabled).toBe(false)
+    process.env.CONTROLLED_DOCX_READ_NARROW_ENABLED = 'TRUE'
+    await expect(loadEnv()).rejects.toThrow('Invalid boolean configuration: CONTROLLED_DOCX_READ_NARROW_ENABLED')
+  })
   test('parses the approved one-hop trust proxy topology as a number', async () => {
     process.env = {
       ...ORIGINAL_ENV,

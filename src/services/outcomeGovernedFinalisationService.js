@@ -1,3 +1,4 @@
+import { originalOutcomeQualityStageFilter } from '../utils/outcomeQualityStageSubjects.js'
 import {
   OutcomeAsset, OutcomeAssetVersion, OutcomeDraft, OutcomeDraftIteration,
   OutcomeKnowledgeCompositionPlan, OutcomeQualityStageExecution, OutcomeRenderOutput, OutcomeSession, RuntimeInstance,
@@ -45,8 +46,8 @@ export const readGovernedApprovalState = async ({ scope, sessionId, draftId, dbS
     || requestPlan?.planId !== chain.planId || requestPlan?.planFingerprint !== chain.planFingerprint) {
     throw governedFinalisationConflict('OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT')
   }
-  const history = await read(OutcomeQualityStageExecution.find({ ...scope, requestId: chain.requestId, planId: chain.planId,
-    draftId, draftIterationId: iteration.draftIterationId }).sort({ stageOrder: 1, attemptNumber: 1 }), dbSession)
+  const history = await read(OutcomeQualityStageExecution.find(originalOutcomeQualityStageFilter({ ...scope, requestId: chain.requestId, planId: chain.planId,
+    draftId, draftIterationId: iteration.draftIterationId })).sort({ stageOrder: 1, attemptNumber: 1 }), dbSession)
   const stages = validateOutcomeGovernedQualityChain({ plan, runtime, stages: history, recordedStages: chain.stages,
     styleSource: await loadOutcomeGovernedQualityChainStyleSource({ plan, stages: history, session: dbSession }),
     requestBinding: { requestId: chain.requestId, draftId, draftIterationId: iteration.draftIterationId } })

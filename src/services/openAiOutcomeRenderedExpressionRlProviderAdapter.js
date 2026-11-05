@@ -1,3 +1,4 @@
+import { normalizeRenderedExpressionRlOutput, RENDERED_EXPRESSION_RL_DIMENSIONS as REQUIRED_DIMENSIONS } from '../utils/outcomeRenderedExpressionRlOutput.js'
 import { createHash } from 'node:crypto'
 
 import logger from '../config/logger.js'
@@ -21,9 +22,7 @@ const MAX_RESPONSE_TEXT_BYTES = 60000
 const RESPONSE_ID_PATTERN = /^resp_[A-Za-z0-9_-]{1,195}$/
 const ACTIVE_STATUSES = new Set(['queued', 'in_progress'])
 const TRANSIENT_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
-const REQUIRED_DIMENSIONS = Object.freeze([
-  'STATEMENTS', 'HEADINGS', 'DIAGRAMS', 'HIERARCHY', 'QUALIFICATION', 'ACCESSIBILITY', 'BRAND_EXPRESSION',
-])
+
 const FAILURE_REASONS = new Set([
   'RENDERED_EXPRESSION_RL_PROVIDER_REQUEST_FAILED',
   'RENDERED_EXPRESSION_RL_PROVIDER_TIMEOUT',
@@ -40,13 +39,6 @@ const FAILURE_REASONS = new Set([
 const text = (value) => String(value ?? '').trim()
 const upper = (value) => text(value).toUpperCase()
 const lower = (value) => text(value).toLowerCase()
-const exactKeys = (value, keys) => Boolean(
-  value
-  && typeof value === 'object'
-  && !Array.isArray(value)
-  && Object.keys(value).length === keys.length
-  && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
-)
 const safeCount = (value) => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0
 const safeId = (value) => /^[A-Za-z0-9._:-]{1,200}$/.test(text(value)) ? text(value) : ''
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -90,47 +82,8 @@ const outputJsonSchema = () => ({
   },
 })
 
-export const normalizeOutcomeRenderedExpressionRlProviderOutput = (value) => {
-  if (!exactKeys(value, ['outputType', 'schemaVersion', 'overallStatus', 'findings'])
-    || upper(value.outputType) !== OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION_RL
-    || value.schemaVersion !== OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION
-    || !['PASS', 'FAIL'].includes(upper(value.overallStatus))
-    || !Array.isArray(value.findings)
-    || value.findings.length !== REQUIRED_DIMENSIONS.length) {
-    throw providerError('RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID')
-  }
-  const findings = value.findings.map((finding) => {
-    if (!exactKeys(finding, ['dimension', 'status', 'finding', 'requiredChange'])
-      || !REQUIRED_DIMENSIONS.includes(upper(finding.dimension))
-      || !['PASS', 'FAIL'].includes(upper(finding.status))
-      || !text(finding.finding)
-      || text(finding.finding).length > 4000
-      || typeof finding.requiredChange !== 'boolean'
-      || (upper(finding.status) === 'PASS') !== (finding.requiredChange === false)) {
-      throw providerError('RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID')
-    }
-    return {
-      dimension: upper(finding.dimension),
-      status: upper(finding.status),
-      finding: text(finding.finding),
-      requiredChange: finding.requiredChange,
-    }
-  })
-  if (new Set(findings.map((finding) => finding.dimension)).size !== REQUIRED_DIMENSIONS.length
-    || REQUIRED_DIMENSIONS.some((dimension) => !findings.some((finding) => finding.dimension === dimension))) {
-    throw providerError('RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID')
-  }
-  const failed = findings.some((finding) => finding.status === 'FAIL')
-  if ((upper(value.overallStatus) === 'FAIL') !== failed) {
-    throw providerError('RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID')
-  }
-  return {
-    outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION_RL,
-    schemaVersion: OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
-    overallStatus: failed ? 'FAIL' : 'PASS',
-    findings,
-  }
-}
+export const normalizeOutcomeRenderedExpressionRlProviderOutput = value => normalizeRenderedExpressionRlOutput(value,
+  () => providerError('RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID'))
 
 const extractOutput = (responseBody) => {
   if (lower(responseBody?.status) !== 'completed' || !Array.isArray(responseBody.output)) {
@@ -325,3 +278,5 @@ export const createOpenAiOutcomeRenderedExpressionRlProviderAdapter = ({
 }
 
 export default createOpenAiOutcomeRenderedExpressionRlProviderAdapter
+// Shared grading schema only; the predecessor's transport and behavior remain unchanged.
+export { outputJsonSchema as buildOutcomeRenderedExpressionRlOutputSchema }

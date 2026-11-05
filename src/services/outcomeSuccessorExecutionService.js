@@ -1,3 +1,4 @@
+import { originalOutcomeQualityStageFilter } from '../utils/outcomeQualityStageSubjects.js'
 import { randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import { assertNormalOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
@@ -69,8 +70,8 @@ export const readOutcomeSuccessorOwnerState = async ({ operation, session = null
   const chain = iteration.lineageSummary?.governedQualityChain
   const stageIds = chain?.stages?.map((stage) => stage.stageExecutionId)
   if (!stageIds?.length) throw outcomeSuccessorError('OUTCOME_SUCCESSOR_RESULT_INCOMPLETE')
-  const stages = await (deps.OutcomeQualityStageExecution || OutcomeQualityStageExecution).find({ ...scope,
-    requestId: operation.requestId, planId: plan.planId }).session(session).maxTimeMS(2000).lean()
+  const stages = await (deps.OutcomeQualityStageExecution || OutcomeQualityStageExecution).find(originalOutcomeQualityStageFilter({ ...scope,
+    requestId: operation.requestId, planId: plan.planId })).session(session).maxTimeMS(2000).lean()
   const accepted = (deps.validateQualityChain || validateOutcomeGovernedQualityChain)({ plan,
     requestBinding: { requestId: operation.requestId, draftId: draft.draftId, draftIterationId: iteration.draftIterationId },
     stages, recordedStages: chain.stages })
@@ -96,8 +97,8 @@ const updateClaimed = async ({ operation, claimId, status, refs, blockerReason =
 
 const readRecordedFailure = async ({ operation, deps }) => {
   if (!operation.refs?.planId) return null
-  return (deps.OutcomeQualityStageExecution || OutcomeQualityStageExecution).findOne({ ...scopedQuery(operation),
-    requestId: operation.requestId, planId: operation.refs.planId, status: 'FAILED' })
+  return (deps.OutcomeQualityStageExecution || OutcomeQualityStageExecution).findOne(originalOutcomeQualityStageFilter({ ...scopedQuery(operation),
+    requestId: operation.requestId, planId: operation.refs.planId, status: 'FAILED' }))
     .sort({ stageOrder: -1, attemptNumber: -1 }).maxTimeMS(2000).lean()
 }
 

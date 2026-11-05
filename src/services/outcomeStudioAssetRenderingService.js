@@ -92,6 +92,9 @@ const sortedJson = (value) => {
 
 const sha256Json = (value) => `sha256:${createHash('sha256').update(JSON.stringify(sortedJson(value)), 'utf8').digest('hex')}`
 const sha256Buffer = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`
+// Shared by private rendition compilation; preserve the existing source hash.
+export const computeOutcomeStudioRenderableSourceChecksum = ({ title, markdown, sections, evidenceReferences, governanceMarkers }) =>
+  sha256Json({ title, markdown, sections, evidenceReferences, governanceMarkers })
 const normalizeStringList = (value) => (
   Array.isArray(value) ? value.map(normalizeText).filter(Boolean) : []
 )
@@ -396,7 +399,7 @@ export const buildOutcomeStudioRenderableAsset = ({
     failInput('OUTPUT_CONTRACT_INCOMPLETE')
   }
 
-  const sourceContentChecksum = sha256Json({
+  const sourceContentChecksum = computeOutcomeStudioRenderableSourceChecksum({
     title,
     markdown,
     sections,

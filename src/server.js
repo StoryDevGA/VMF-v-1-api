@@ -1,4 +1,6 @@
 import http from 'node:http'
+import mongoose from 'mongoose'
+import { resolveDevelopmentStartupPolicy } from './config/developmentStartupPolicy.js'
 import app from './app.js'
 import env from './config/env.js'
 import logger from './config/logger.js'
@@ -8,6 +10,11 @@ import { runSeeds } from './seeds/index.js'
 import { startRetentionScheduler, stopRetentionScheduler } from './services/retentionSchedulerService.js'
 import { startBackgroundJobs, stopBackgroundJobs } from './services/backgroundJobService.js'
 
+const startup = resolveDevelopmentStartupPolicy(env)
+if (startup.quiet) {
+  mongoose.set('autoCreate', false)
+  mongoose.set('autoSearchIndex', false)
+}
 const server = http.createServer(app)
 
 server.on('error', (err) => {
@@ -18,13 +25,13 @@ server.on('error', (err) => {
 const startServer = async () => {
   try {
     // Connect to MongoDB (required)
-    await connectDb()
+    await connectDb({ autoIndex: startup.autoIndex })
 
     // Connect to Redis (optional in development)
     await connectRedis()
     
     // Run database seeds if needed
-    if (env.nodeEnv === 'development') {
+    if (startup.runSeeds) {
       try {
         logger.info('Running database seeds...')
         await runSeeds()
@@ -35,8 +42,12 @@ const startServer = async () => {
     
     server.listen(env.port, () => {
       logger.info({ port: env.port }, 'server listening')
-      startRetentionScheduler()
-      startBackgroundJobs()
+      if (startup.startMaintenance) {
+        startRetentionScheduler()
+        startBackgroundJobs()
+      } else {
+        logger.info('Quiet development startup: automatic indexes, seeds and maintenance are disabled')
+      }
     })
   } catch (err) {
     logger.error({ err }, 'failed to start server')

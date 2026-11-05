@@ -1,4 +1,14 @@
 import { OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeDecisionLedCommercialExpressionProfile.js'
+import { OUTCOME_RENDITION_QUALITY_STAGE_VERSION, OUTCOME_RENDITION_QUALITY_STAGE_KEY, MASTER_LINKED_REVIEW_STAGE_VERSION, MASTER_LINKED_REVIEW_STAGE_KEYS,
+  CORRECTED_MASTER_LINKED_REVIEW_STAGE_VERSION, CORRECTED_MASTER_LINKED_REVIEW_STAGE_KEY, CORRECTED_MASTER_LINKED_GENUINE_STAGE_KEY,
+  CATEGORY_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_MASTER_LINKED_REVIEW_STAGE_KEY,
+  CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_KEY,
+  APPROVED_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_MASTER_LINKED_REVIEW_STAGE_KEY,
+  APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_KEY,
+  NARROW_MASTER_LINKED_REVIEW_STAGE_VERSION, NARROW_MASTER_LINKED_REVIEW_STAGE_KEY } from '../utils/outcomeQualityStageSubjects.js'
+import { hasCompletedStageIdentity, assertCompletedReviewStage, completedStageFilter, carriesCompletedReviewValue } from '../services/masterLinkedCompletedReviewContract.js'
+import { assertRenditionQualityStage, hasRenditionQualityStageIdentity, reservedRenditionStageFilter, isRenditionQualityStageTime } from '../services/outcomeRenditionQualityStageContract.js'
+import { RENDITION_TRANSPORT } from '../services/outcomeRenditionReviewClaimContract.js'
 import { assertAuthorisedArlReceipt } from '../services/outcomeArlTransportRecoveryService.js'
 import { assertOutcomeArlTransportReceipt } from '../services/outcomeArlTransportRecoveryService.js'
 import { createHash } from 'node:crypto'
@@ -43,6 +53,27 @@ const stableKeyPattern = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
 const sectionRootPattern = /^framework_state\.sections\.([a-z0-9](?:[a-z0-9_-]{0,138}[a-z0-9])?)$/
 const legacySectionPathPattern = /^framework_state\.sections\.([a-z0-9](?:[a-z0-9_-]{0,138}[a-z0-9])?)(\.accepted)?$/
 const nestedOptions = { _id: false, strict: 'throw' }
+const historicalArlProviderVersion = 'OUTCOME_ARL_MEANING_REVIEW_OPENAI_RESPONSES_V11_REASONING'
+const historicalReadDocuments = new WeakSet()
+const creationProviderVersions = Object.freeze(['', RENDITION_TRANSPORT.configurationVersion,
+  ...new Set(Object.values(OUTCOME_QUALITY_STAGE_PROVIDER_CONFIG_VERSIONS).flat())])
+const allowsHistoricalRead = (document, version) => Boolean(document && historicalReadDocuments.has(document)
+  && document.stageKey === OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW
+  && document.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED && version === historicalArlProviderVersion)
+const isHistoricalProviderVersion = value => typeof value === 'string' && value.trim() === historicalArlProviderVersion
+const historicalProviderWrite = value => {
+  if (!value || typeof value !== 'object') return false
+  const legacyValue = candidate => isHistoricalProviderVersion(candidate)
+    || isHistoricalProviderVersion(candidate?.$eq)
+    || (Array.isArray(candidate?.$in) && candidate.$in.some(isHistoricalProviderVersion))
+  if (legacyValue(value.executionIdentity?.providerConfigurationVersion)
+    || legacyValue(value.executionIdentity?.$eq?.providerConfigurationVersion)
+    || legacyValue(value['executionIdentity.providerConfigurationVersion'])) return true
+  if (value.$rename && Object.values(value.$rename).some(target =>
+    ['executionIdentity', 'executionIdentity.providerConfigurationVersion'].includes(target))) return true
+  return ['$set', '$setOnInsert'].some(key => historicalProviderWrite(value[key]))
+    || ['$and', '$or', '$nor'].some(key => Array.isArray(value[key]) && value[key].some(historicalProviderWrite))
+}
 const requiredText = (maxlength) => ({ type: String, required: true, trim: true, minlength: 1, maxlength })
 const optionalText = (maxlength) => ({ type: String, trim: true, maxlength, default: '' })
 const strictInteger = ({ min = 0, max = Number.MAX_SAFE_INTEGER }) => ({
@@ -292,7 +323,30 @@ const executionIdentitySchema = new mongoose.Schema({
   providerKey: { ...optionalText(140), lowercase: true, match: /^(?:[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?)?$/ },
   providerConfigurationVersion: {
     ...optionalText(160),
-    enum: ['', ...new Set(Object.values(OUTCOME_QUALITY_STAGE_PROVIDER_CONFIG_VERSIONS).flat())],
+    validate: {
+      validator(value) {
+        return value == null || creationProviderVersions.includes(value)
+          || (this.ownerDocument?.()?.contractVersion === MASTER_LINKED_REVIEW_STAGE_VERSION
+            && Object.values(MASTER_LINKED_REVIEW_STAGE_KEYS).includes(this.ownerDocument?.()?.stageKey) && value === 'MASTER_LINKED_DOCX_PREPARATION_V2')
+          || (this.ownerDocument?.()?.contractVersion === CORRECTED_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && [CORRECTED_MASTER_LINKED_REVIEW_STAGE_KEY, CORRECTED_MASTER_LINKED_GENUINE_STAGE_KEY].includes(this.ownerDocument?.()?.stageKey)
+            && value === 'MASTER_LINKED_DOCX_CORRECTION_PREPARATION_V1')
+          || (this.ownerDocument?.()?.contractVersion === CATEGORY_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && this.ownerDocument?.()?.stageKey === CATEGORY_MASTER_LINKED_REVIEW_STAGE_KEY && value === 'MASTER_LINKED_DOCX_CATEGORY_QA_V1')
+          || (this.ownerDocument?.()?.contractVersion === CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && this.ownerDocument?.()?.stageKey === CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_KEY && value === 'MASTER_LINKED_DOCX_CATEGORY_GENUINE_V1')
+          || (this.ownerDocument?.()?.contractVersion === APPROVED_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && this.ownerDocument?.()?.stageKey === APPROVED_MASTER_LINKED_REVIEW_STAGE_KEY && value === 'MASTER_LINKED_DOCX_APPROVED_GENUINE_V1')
+          || (this.ownerDocument?.()?.contractVersion === APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && this.ownerDocument?.()?.stageKey === APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_KEY && value === 'MASTER_LINKED_DOCX_APPROVED_QA_V1')
+          || (this.ownerDocument?.()?.contractVersion === NARROW_MASTER_LINKED_REVIEW_STAGE_VERSION
+            && this.ownerDocument?.()?.stageKey === NARROW_MASTER_LINKED_REVIEW_STAGE_KEY && value === 'MASTER_LINKED_DOCX_NARROW_GENUINE_V1')
+          || allowsHistoricalRead(this.ownerDocument?.(), value)
+      },
+      message: mongoose.Error.messages.String.enum,
+      type: 'enum',
+      enumValues: creationProviderVersions,
+    },
   },
   model: optionalText(160),
   grrExecutionId: optionalText(180),
@@ -303,7 +357,7 @@ const executionIdentitySchema = new mongoose.Schema({
 const schema = new mongoose.Schema({
   stageExecutionId: { type: String, required: true, immutable: true, trim: true, maxlength: 180 },
   qualityRunId: { type: String, required: true, immutable: true, trim: true, maxlength: 180 },
-  contractVersion: { type: String, required: true, immutable: true, enum: [OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION], default: OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION },
+  contractVersion: { type: String, required: true, immutable: true, enum: [OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION, OUTCOME_RENDITION_QUALITY_STAGE_VERSION, MASTER_LINKED_REVIEW_STAGE_VERSION, CORRECTED_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_VERSION, NARROW_MASTER_LINKED_REVIEW_STAGE_VERSION], default: OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION },
   tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tenant', required: true, immutable: true },
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true, immutable: true },
   runtimeInstanceId: { type: mongoose.Schema.Types.ObjectId, ref: 'RuntimeInstance', required: true, immutable: true },
@@ -322,6 +376,15 @@ const schema = new mongoose.Schema({
     required: true,
     immutable: true,
     enum: [
+      OUTCOME_RENDITION_QUALITY_STAGE_KEY,
+      ...Object.values(MASTER_LINKED_REVIEW_STAGE_KEYS),
+      CORRECTED_MASTER_LINKED_REVIEW_STAGE_KEY,
+      CORRECTED_MASTER_LINKED_GENUINE_STAGE_KEY,
+      CATEGORY_MASTER_LINKED_REVIEW_STAGE_KEY,
+      CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_KEY,
+      APPROVED_MASTER_LINKED_REVIEW_STAGE_KEY,
+      APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_KEY,
+      NARROW_MASTER_LINKED_REVIEW_STAGE_KEY,
       OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE,
       OUTCOME_QUALITY_STAGES.WORKING_DRAFT,
       OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW,
@@ -330,7 +393,7 @@ const schema = new mongoose.Schema({
       OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
     ],
   },
-  stageOrder: { ...strictInteger({ min: 1, max: 6 }), immutable: true },
+  stageOrder: { ...strictInteger({ min: 0, max: 6 }), immutable: true },
   attemptNumber: { ...strictInteger({ min: 1 }), immutable: true },
   predecessorStageExecutionId: { type: String, immutable: true, trim: true, maxlength: 180, default: '' },
   predecessorAttemptFingerprint: { type: String, immutable: true, match: /^(?:[a-f0-9]{64})?$/, default: '' },
@@ -338,7 +401,8 @@ const schema = new mongoose.Schema({
   inputFingerprint: { type: String, required: true, immutable: true, match: sha256Pattern },
   outputFingerprint: { type: String, immutable: true, match: /^(?:[a-f0-9]{64})?$/, default: '' },
   attemptFingerprint: { type: String, required: true, immutable: true, match: sha256Pattern },
-  inputSnapshot: { type: inputSnapshotSchema, required: true, immutable: true },
+  inputSnapshot: { type: inputSnapshotSchema, required() { return ![OUTCOME_RENDITION_QUALITY_STAGE_VERSION, MASTER_LINKED_REVIEW_STAGE_VERSION, CORRECTED_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_MASTER_LINKED_REVIEW_STAGE_VERSION, CATEGORY_GENUINE_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_MASTER_LINKED_REVIEW_STAGE_VERSION, APPROVED_QA_MASTER_LINKED_REVIEW_STAGE_VERSION, NARROW_MASTER_LINKED_REVIEW_STAGE_VERSION].includes(this.contractVersion) }, immutable: true },
+  renditionInputSnapshot: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true },
   outputSnapshot: { type: mongoose.Schema.Types.Mixed, immutable: true, default: undefined },
   failure: { type: failureSchema, immutable: true, default: undefined },
   executionIdentity: { type: executionIdentitySchema, required: true, immutable: true },
@@ -375,6 +439,14 @@ const immutableError = () => {
   error.status = 409
   return error
 }
+
+// Preserve legacy Date casting, but remember the original input type so a new
+// rendition branch cannot admit numeric/noncanonical times after ODM casting.
+for (const field of ['startedAt', 'completedAt']) schema.path(field).set(function rememberRenditionTime(value) {
+  this.$locals.renditionTimeInputs ||= {}
+  this.$locals.renditionTimeInputs[field] = isRenditionQualityStageTime(value)
+  return value
+})
 
 const shapeError = (message) => {
   const error = new mongoose.Error.ValidationError()
@@ -719,6 +791,17 @@ schema.pre('validate', function validateShape(next) {
   this.outputFingerprint = String(this.outputFingerprint || '').trim().toLowerCase()
   this.attemptFingerprint = String(this.attemptFingerprint || '').trim().toLowerCase()
 
+  if (hasCompletedStageIdentity(this)) {
+    if (Object.values(this.$locals.renditionTimeInputs || {}).some(valid => !valid)) return next(shapeError('Rendition stage time input is invalid.'))
+    try { assertCompletedReviewStage(this) } catch { return next(shapeError('Master-linked completed review stage is inconsistent.')) }
+    return next()
+  }
+  if (hasRenditionQualityStageIdentity(this)) {
+    if (Object.values(this.$locals.renditionTimeInputs || {}).some(valid => !valid)) return next(shapeError('Rendition stage time input is invalid.'))
+    try { assertRenditionQualityStage(this) } catch { return next(shapeError('Rendition quality stage governed shape is inconsistent.')) }
+    return next()
+  }
+
   const input = plain(this.inputSnapshot)
   const output = plain(this.outputSnapshot)
   const failure = plain(this.failure)
@@ -739,7 +822,8 @@ schema.pre('validate', function validateShape(next) {
   const providerConfigurationIdentityInvalid = Boolean(identity?.providerKey)
     !== Boolean(providerConfigurationVersion)
     || (providerConfigurationVersion
-      && !allowedProviderConfigurationVersions.includes(providerConfigurationVersion))
+      && !allowedProviderConfigurationVersions.includes(providerConfigurationVersion)
+      && !allowsHistoricalRead(this, providerConfigurationVersion))
   const providerRequired = [
     OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE,
     OUTCOME_QUALITY_STAGES.WORKING_DRAFT,
@@ -960,7 +1044,11 @@ schema.pre('validate', function validateShape(next) {
 })
 
 schema.pre('save', function rejectExistingSave(next) {
-  if (!this.isNew) return next(immutableError())
+  if (!this.isNew || historicalReadDocuments.has(this) || historicalProviderWrite(this)) return next(immutableError())
+  if (hasCompletedStageIdentity(this)) {
+    if (Object.values(this.$locals.renditionTimeInputs || {}).some(valid => !valid)) return next(immutableError())
+    try { assertCompletedReviewStage(this) } catch (error) { return next(error) }
+  }
   next()
 })
 
@@ -982,4 +1070,79 @@ schema.pre('deleteOne', { document: true, query: false }, function rejectDocumen
   next(immutableError())
 })
 
-export default mongoose.model('OutcomeQualityStageExecution', schema)
+schema.pre('insertMany', async function validateRenditionInsertMany(next, records) {
+  try {
+    for (let index = 0; index < records.length; index++) {
+      if (hasCompletedStageIdentity(records[index])) throw immutableError()
+      if (historicalProviderWrite(records[index])) throw immutableError()
+      if (!hasRenditionQualityStageIdentity(records[index])) continue
+      const document = new this(records[index])
+      await document.validate()
+      // lean insertMany skips Mongoose casting. Use the validated typed shape
+      // even on that path, rather than persisting unchecked string identifiers.
+      records[index] = document.toObject({ depopulate: true })
+    }
+    next()
+  } catch (error) { next(error) }
+})
+
+const carriesReservedStageValue = value => {
+  if (carriesCompletedReviewValue(value)) return true
+  if (typeof value === 'string') return value.trim() === OUTCOME_RENDITION_QUALITY_STAGE_VERSION
+    || value.trim().toUpperCase() === OUTCOME_RENDITION_QUALITY_STAGE_KEY
+  if (!value || typeof value !== 'object') return false
+  return Object.entries(value).some(([field, child]) => field.split('.').includes('renditionInputSnapshot')
+    || carriesReservedStageValue(child))
+}
+schema.pre('bulkWrite', function protectRenditionBulk(next, operations) {
+  try {
+    for (const operation of operations) {
+      if (operation.insertOne) {
+        if (hasCompletedStageIdentity(operation.insertOne.document) || hasRenditionQualityStageIdentity(operation.insertOne.document)
+          || historicalProviderWrite(operation.insertOne.document)) throw immutableError()
+        continue
+      }
+      const name = Object.keys(operation)[0], entry = operation[name]
+      if (!['updateOne', 'updateMany', 'replaceOne', 'deleteOne', 'deleteMany'].includes(name) || !entry) throw immutableError()
+      const update = entry.update || entry.replacement
+      if (Array.isArray(update) || carriesReservedStageValue(update) || historicalProviderWrite(update)
+        || (entry.upsert && historicalProviderWrite(entry.filter))
+        || (entry.upsert && carriesReservedStageValue(entry.filter))) throw immutableError()
+      if (update?.$rename && Object.entries(update.$rename).some(([from, to]) => [from, to]
+        .some(field => ['contractVersion', 'stageKey', 'renditionInputSnapshot'].includes(String(field).split('.')[0])))) throw immutableError()
+      entry.filter = { $and: [entry.filter || {}, { $nor: [...reservedRenditionStageFilter().$or, ...completedStageFilter.$or] }] }
+    }
+    next()
+  } catch (error) { next(error) }
+})
+
+const OutcomeQualityStageExecution = mongoose.model('OutcomeQualityStageExecution', schema)
+
+// Read validation is deliberately unavailable through document flags/options.
+// The internal document never escapes, and its allowance ends before return.
+export const validateHistoricalArlMeaningStageForRead = async raw => {
+  if (!raw || Object.getPrototypeOf(raw) !== Object.prototype
+    || raw.stageKey !== OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW
+    || raw.status !== OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
+    || raw.executionIdentity?.providerConfigurationVersion !== historicalArlProviderVersion
+    || raw.executionIdentity.providerKey !== 'openai' || raw.executionIdentity.executionMode !== 'LIVE_TEST'
+    || !raw.executionIdentity.grrExecutionId || !raw.executionIdentity.grrRuntimeArtifactId) {
+    throw Object.assign(new Error('Historical meaning-stage read validation is unavailable.'), {
+      code: 'HISTORICAL_ARL_READ_BLOCKED', status: 409,
+    })
+  }
+  const bytes = mongoose.mongo.BSON.serialize(raw)
+  const document = new OutcomeQualityStageExecution(mongoose.mongo.BSON.deserialize(bytes))
+  historicalReadDocuments.add(document)
+  try {
+    await document.validate()
+    return Object.freeze({ contractVersion: 'historical-arl-read.v1', status: 'VALIDATED_FOR_READ_ONLY',
+      stageExecutionId: document.stageExecutionId, inputFingerprint: document.inputFingerprint,
+      outputFingerprint: document.outputFingerprint, attemptFingerprint: document.attemptFingerprint,
+      recordFingerprint: createHash('sha256').update(bytes).digest('hex'),
+      providerConfigurationVersion: historicalArlProviderVersion,
+      provesProvenance: false, authorisesCreation: false, authorisesAdmission: false, authorisesApproval: false })
+  } finally { historicalReadDocuments.delete(document) }
+}
+
+export default OutcomeQualityStageExecution

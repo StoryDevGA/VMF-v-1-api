@@ -410,7 +410,7 @@ describe('isolated coordinator actual service with controlled dependency seams',
 
 describe('strict isolated transport and mounted controller (simulated authentication only)', () => {
   const owners = Object.fromEntries(['inspectIsolatedSyntheticOutcome', 'planIsolatedSyntheticOutcome',
-    'confirmIsolatedSyntheticOutcomePlan', 'executeIsolatedSyntheticOutcome', 'readIsolatedSyntheticOutcome'].map(key => [key, jest.fn()]))
+    'confirmIsolatedSyntheticOutcomePlan', 'executeIsolatedSyntheticOutcome', 'readIsolatedSyntheticOutcome', 'readOutcomeDocxRenditionSource'].map(key => [key, jest.fn()]))
   let app, schemas
   const path = `/${p.runtimeInstanceId}/synthetic-outcome`
   const selectedScope = `?customerId=${p.customerId}&tenantId=${p.tenantId}`
@@ -421,6 +421,7 @@ describe('strict isolated transport and mounted controller (simulated authentica
       readLatestIsolatedSyntheticOutcome: owners.readIsolatedSyntheticOutcome,
       completeIsolatedSyntheticOutcome: jest.fn(),
     }))
+    jest.unstable_mockModule('../services/outcomeDocxRenditionSourceService.js', () => ({ readOutcomeDocxRenditionSource: owners.readOutcomeDocxRenditionSource }))
     jest.unstable_mockModule('../controllers/runtimeInstance.controller.js', () => ({
       buildRuntimeStateRequestScopes: ({ scopes, query }) => ({ ...scopes, selectedCustomerId: query.customerId, selectedTenantId: query.tenantId }),
     }))
@@ -434,9 +435,29 @@ describe('strict isolated transport and mounted controller (simulated authentica
       schemas.validateIsolatedSyntheticConfirm, handlers.confirmIsolatedSyntheticOutcomePlanEndpoint)
     app.post('/:runtimeInstanceId/synthetic-outcome/execute', schemas.validateIsolatedSyntheticScope, schemas.validateIsolatedSyntheticExecute, handlers.executeIsolatedSyntheticOutcomeEndpoint)
     app.get('/:runtimeInstanceId/synthetic-outcome/run', schemas.validateIsolatedSyntheticScope, handlers.readIsolatedSyntheticOutcomeEndpoint)
+    app.get('/:runtimeInstanceId/outcome-studio/docx-rendition-source', schemas.validateIsolatedSyntheticScope, handlers.readOutcomeDocxRenditionSourceEndpoint)
     app.use((_error, _req, res, _next) => res.status(500).json({ error: { code: 'REJECTED_DEPENDENCY' } }))
   })
   beforeEach(() => { Object.values(owners).forEach(owner => owner.mockReset()) })
+  test('mounted DOCX source read uses authenticated actor and preserves rejected source dependency', async () => {
+    const route = `/${p.runtimeInstanceId}/outcome-studio/docx-rendition-source${selectedScope}`
+    owners.readOutcomeDocxRenditionSource.mockResolvedValue({ renderingAvailable: false, deliveryAvailable: false })
+    const result = await supertest(app).get(route)
+    expect(result.status).toBe(200)
+    expect(result.body.data).toEqual({ renderingAvailable: false, deliveryAvailable: false })
+    expect(owners.readOutcomeDocxRenditionSource).toHaveBeenCalledWith(expect.objectContaining({
+      actorUserId: p.actorUserId, runtimeInstanceId: p.runtimeInstanceId,
+      scopes: expect.objectContaining({ selectedCustomerId: p.customerId, selectedTenantId: p.tenantId }),
+    }))
+    owners.readOutcomeDocxRenditionSource.mockRejectedValue(Object.assign(new Error('Signed source unavailable'), { status: 503, code: 'SOURCE_UNAVAILABLE' }))
+    expect((await supertest(app).get(route)).body.error.code).toBe('SOURCE_UNAVAILABLE')
+    owners.readOutcomeDocxRenditionSource.mockRejectedValue(new Error('Unexpected dependency failure'))
+    expect((await supertest(app).get(route)).status).toBe(500)
+    owners.readOutcomeDocxRenditionSource.mockClear()
+    expect((await supertest(app).get(route + '&actorUserId=other')).status).toBe(422)
+    expect(owners.readOutcomeDocxRenditionSource).not.toHaveBeenCalled()
+    expect(owners.executeIsolatedSyntheticOutcome).not.toHaveBeenCalled()
+  })
   test.each(['actorUserId', 'classification', 'force', 'providerRuntimeDeps', 'stageOutputs', 'allowSynthetic'])('rejects caller %s override before execution', async key => {
     const response = await supertest(app).post(path + '/execute' + selectedScope).send({ ...coordinatorFixture().args.payload, [key]: true })
     expect(response.status).toBe(422); expect(owners.executeIsolatedSyntheticOutcome).not.toHaveBeenCalled()
@@ -1189,7 +1210,7 @@ describe('R3 preserved failed binding run continuation', () => {
     await expect(nativeIsolatedOwner.executeIsolatedSyntheticOutcome(f.args)).rejects.toMatchObject({ details: { reason: 'CONTINUATION_PRIOR_EXECUTION_EXISTS' } })
     expect(f.rows).toHaveLength(2)
     const filter = f.deps.models[key].findOne.mock.calls[0][0]
-    expect(filter.$or).toEqual([
+    expect((key === 'OutcomeQualityStageExecution' ? filter.$and[0] : filter).$or).toEqual([
       { [key === 'OutcomeQualityStageExecution' ? 'requestId' : key === 'GovernedReasoningExecution' ? 'executionEvidence.syntheticClassification.requestId' : 'lineageSummary.syntheticClassification.requestId']: f.plan.requestId },
       { [key === 'OutcomeQualityStageExecution' ? 'planId' : key === 'GovernedReasoningExecution' ? 'executionEvidence.syntheticClassification.planId' : 'lineageSummary.syntheticClassification.planId']: f.plan.planId },
     ])

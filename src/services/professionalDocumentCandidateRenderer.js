@@ -58,6 +58,17 @@ export const PROFESSIONAL_DOCUMENT_CANDIDATE_ERROR_CODES = Object.freeze({
   VALIDATION_FAILED: 'PROFESSIONAL_DOCUMENT_CANDIDATE_VALIDATION_FAILED',
 })
 
+export const PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES = Object.freeze({
+  STANDARD: 'STANDARD_V1',
+  ATTRIBUTED_QUOTATIONS: 'KEEP_LABEL_WITH_QUOTE_V1',
+  SOURCE_SCOPED_QUOTATIONS: 'SOURCE_SCOPED_QUOTATIONS_V2',
+})
+
+export const PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES = Object.freeze({
+  ENGINEERING: 'ENGINEERING_CANDIDATE_V1',
+  CUSTOMER: 'CUSTOMER_DOCUMENT_V1',
+})
+
 const FIXED_PACKAGE_DATE = new Date('2000-01-01T00:00:00.000Z')
 const BODY_WIDTH_DXA = 9_360
 const COLORS = Object.freeze({
@@ -444,7 +455,18 @@ const makeTable = ({ header, rows }) => {
   })
 }
 
-const blockToDocumentChildren = (block) => {
+const blockToDocumentChildren = (block, { keepWithNext = false, qualificationCallout = false, sourceScoped = false } = {}) => {
+  if (qualificationCallout) {
+    return [new Paragraph({
+      spacing: { before: 120, after: 180, line: 310 },
+      indent: block.type === 'bullet' ? { left: 540, hanging: 180, right: 180 } : { left: 180, right: 180 },
+      ...(block.type === 'bullet' ? { bullet: { level: 0 } } : {}),
+      shading: { type: ShadingType.CLEAR, fill: COLORS.paleGray, color: 'auto' },
+      border: Object.fromEntries(['top', 'bottom', 'left', 'right'].map(side => [side,
+        { style: BorderStyle.SINGLE, size: 6, color: COLORS.border, space: 8 }])),
+      children: inlineRuns(block.text),
+    })]
+  }
   if (block.type === 'heading') {
     const heading = block.level === 1
       ? HeadingLevel.HEADING_1
@@ -453,6 +475,7 @@ const blockToDocumentChildren = (block) => {
   }
   if (block.type === 'bullet') {
     return [new Paragraph({
+      ...(sourceScoped ? { keepNext: keepWithNext, keepLines: true } : {}),
       bullet: { level: 0 },
       spacing: { after: 90, line: 300 },
       children: inlineRuns(block.text),
@@ -460,6 +483,7 @@ const blockToDocumentChildren = (block) => {
   }
   if (block.type === 'number') {
     return [new Paragraph({
+      ...(sourceScoped ? { keepNext: keepWithNext, keepLines: true } : {}),
       numbering: { reference: 'candidate-numbering', level: 0 },
       spacing: { after: 90, line: 300 },
       children: inlineRuns(block.text),
@@ -467,11 +491,12 @@ const blockToDocumentChildren = (block) => {
   }
   if (block.type === 'quote') {
     return [new Paragraph({
+      ...(sourceScoped ? { keepNext: keepWithNext, keepLines: true } : {}),
       spacing: { before: 120, after: 180, line: 300 },
       indent: { left: 280, right: 180 },
       shading: { type: ShadingType.CLEAR, fill: COLORS.paleBlue, color: 'auto' },
       borders: { left: { style: BorderStyle.SINGLE, size: 20, color: COLORS.blue, space: 10 } },
-      children: inlineRuns(block.text, { color: COLORS.body, italics: true }),
+      children: inlineRuns(block.text, { color: COLORS.body, italics: !sourceScoped }),
     })]
   }
   if (block.type === 'code') {
@@ -493,21 +518,48 @@ const blockToDocumentChildren = (block) => {
     })]
   }
   return [new Paragraph({
+    ...(keepWithNext ? { keepNext: true } : {}),
+    ...(sourceScoped ? { keepLines: true } : {}),
     spacing: { after: 150, line: 310 },
     children: inlineRuns(block.text),
   })]
 }
 
-const createDocument = ({ documentMetadata, parsed }) => {
+// Only the separately versioned source-scoped profile groups these evidence
+// units. Old profiles retain their exact paragraph construction and bytes.
+const sourceScopedKeepIndices = blocks => {
+  const keep = new Set()
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index], next = blocks[index + 1]
+    if (block.type === 'heading' && block.level === 1) {
+      let end = index + 1
+      while (end < blocks.length && !(blocks[end].type === 'heading' && blocks[end].level === 1)
+        && !['quote', 'bullet', 'number', 'table'].includes(blocks[end].type)) end += 1
+      if (end < blocks.length && ['quote', 'bullet', 'number', 'table'].includes(blocks[end].type)) {
+        for (let cursor = index; cursor < end; cursor += 1) keep.add(cursor)
+      }
+    }
+    if (block.type === 'paragraph' && /^\*\*[^*\r\n]+\*\*$/.test(block.text)
+      && ['quote', 'bullet', 'number'].includes(next?.type)) keep.add(index)
+    if (block.type === 'quote' && next?.type === 'paragraph'
+      && next.text.startsWith('These three quoted statements must not be read')) keep.add(index)
+  }
+  return keep
+}
+
+const createDocument = ({ documentMetadata, parsed, layoutProfile, presentationProfile, qualificationCalloutIndices }) => {
   const { title, deliverableType, versionNumber, status } = documentMetadata
-  const headerLabel = `${deliverableType} | Version ${versionNumber}`
+  const customerPresentation = presentationProfile === PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES.CUSTOMER
+  const headerLabel = customerPresentation ? deliverableType : `${deliverableType} | Version ${versionNumber}`
+  const sourceScoped = layoutProfile === PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.SOURCE_SCOPED_QUOTATIONS
+  const groupedIndices = sourceScoped ? sourceScopedKeepIndices(parsed.blocks) : null
 
   return new Document({
-    creator: 'StoryLineOS Output Service Engineering Candidate',
-    lastModifiedBy: 'StoryLineOS Output Service Engineering Candidate',
+    creator: customerPresentation ? 'StoryLineOS' : 'StoryLineOS Output Service Engineering Candidate',
+    lastModifiedBy: customerPresentation ? 'StoryLineOS' : 'StoryLineOS Output Service Engineering Candidate',
     title,
     subject: deliverableType,
-    description: 'Engineering candidate document. Product approval and customer activation are not implied.',
+    description: customerPresentation ? '' : 'Engineering candidate document. Product approval and customer activation are not implied.',
     revision: 1,
     features: { updateFields: true },
     numbering: {
@@ -600,16 +652,16 @@ const createDocument = ({ documentMetadata, parsed }) => {
             spacing: { before: 80 },
             borders: { top: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border, space: 5 } },
             children: [
-              new TextRun({ text: `${deliverableType} | ${status} | Page `, size: 15, color: COLORS.muted }),
+              new TextRun({ text: customerPresentation ? `${deliverableType} | Page ` : `${deliverableType} | ${status} | Page `, size: 15, color: COLORS.muted }),
               new TextRun({ children: [PageNumber.CURRENT], size: 15, color: COLORS.muted }),
             ],
           })],
         }),
       },
       children: [
-        new Paragraph({ style: 'CandidateEyebrow', children: [new TextRun(deliverableType)] }),
+        ...(!sourceScoped ? [new Paragraph({ style: 'CandidateEyebrow', children: [new TextRun(deliverableType)] })] : []),
         new Paragraph({ style: 'CandidateTitle', children: [new TextRun(title)] }),
-        new Paragraph({
+        ...(!customerPresentation ? [new Paragraph({
           spacing: { after: 260 },
           borders: { bottom: { style: BorderStyle.SINGLE, size: 16, color: COLORS.blue, space: 8 } },
           children: [new TextRun({
@@ -617,8 +669,14 @@ const createDocument = ({ documentMetadata, parsed }) => {
             size: 18,
             color: COLORS.muted,
           })],
-        }),
-        ...parsed.blocks.flatMap(blockToDocumentChildren),
+        })] : []),
+        ...parsed.blocks.flatMap((block, index) => blockToDocumentChildren(block, {
+          qualificationCallout: qualificationCalloutIndices.includes(index),
+          sourceScoped,
+          keepWithNext: sourceScoped ? groupedIndices.has(index) : layoutProfile === PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.ATTRIBUTED_QUOTATIONS
+            && block.type === 'paragraph' && /^\*\*[^*\r\n]+\*\*$/.test(block.text)
+            && parsed.blocks[index + 1]?.type === 'quote',
+        })),
       ],
     }],
   })
@@ -803,16 +861,28 @@ const normalizePackage = async (buffer) => {
 export const renderProfessionalDocumentCandidate = async ({
   documentMetadata = {},
   markdown = '',
+  layoutProfile = PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES.STANDARD,
+  presentationProfile = PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES.ENGINEERING,
+  qualificationCalloutIndices = [],
 } = {}) => {
+  if (!Object.values(PROFESSIONAL_DOCUMENT_LAYOUT_PROFILES).includes(layoutProfile)) failInput('LAYOUT_PROFILE_UNSUPPORTED')
+  if (!Object.values(PROFESSIONAL_DOCUMENT_PRESENTATION_PROFILES).includes(presentationProfile)) failInput('PRESENTATION_PROFILE_UNSUPPORTED')
   const {
     documentMetadata: normalizedMetadata,
     source,
     parsed,
   } = parseProfessionalDocumentCandidateInput({ documentMetadata, markdown })
+  if (!Array.isArray(qualificationCalloutIndices) || qualificationCalloutIndices.length > parsed.blocks.length) failInput('QUALIFICATION_CALLOUT_INDICES_INVALID')
+  let priorIndex = -1
+  for (const index of qualificationCalloutIndices) {
+    if (typeof index !== 'number' || !Number.isSafeInteger(index) || index <= priorIndex
+      || index >= parsed.blocks.length || !['paragraph', 'bullet'].includes(parsed.blocks[index]?.type)) failInput('QUALIFICATION_CALLOUT_INDICES_INVALID')
+    priorIndex = index
+  }
   const startedAt = Date.now()
   let buffer
   try {
-    buffer = await Packer.toBuffer(createDocument({ documentMetadata: normalizedMetadata, parsed }))
+    buffer = await Packer.toBuffer(createDocument({ documentMetadata: normalizedMetadata, parsed, layoutProfile, presentationProfile, qualificationCalloutIndices }))
     buffer = await normalizePackage(buffer)
   } catch (error) {
     if (error?.name === 'ProfessionalDocumentCandidateError') throw error

@@ -1,3 +1,4 @@
+import { originalOutcomeQualityStageFilter } from '../utils/outcomeQualityStageSubjects.js'
 import { AUTHORISED_ARL_APPROVAL, assertAuthorisedArlRequest, assertStoredAuthorisedArlReview } from './outcomeArlTransportRecoveryService.js'
 import { withSyntheticOutcomeTransactionReads, invalidateSyntheticOutcomeTransactionReads, readSyntheticOutcomeQuery } from './syntheticOutcomeTransactionReads.js'
 import { isOutcomeArlTransportRecovery } from './outcomeArlTransportRecoveryService.js'
@@ -471,7 +472,7 @@ const assertNoPriorExecution = async (args, plan, session) => {
     const filter = { ...scope(args.runtimeInstanceId), $or: [
       { [`${prefix}requestId`]: plan.requestId }, { [`${prefix}planId`]: plan.planId },
     ] }
-    need(!await query(model(deps, name, fallback).findOne(filter), session), 'CONTINUATION_PRIOR_EXECUTION_EXISTS')
+    need(!await query(model(deps, name, fallback).findOne(name === 'OutcomeQualityStageExecution' ? originalOutcomeQualityStageFilter(filter) : filter), session), 'CONTINUATION_PRIOR_EXECUTION_EXISTS')
   }
 }
 const recoverySource = async (args, auth, expected, session = null) => {
@@ -498,8 +499,8 @@ const recoverySource = async (args, auth, expected, session = null) => {
 }
 const assertRecoveryHistory = async (args, plan, source, session) => {
   const deps = args.deps || {}, nativeScope = scope(args.runtimeInstanceId)
-  need(!await query(model(deps, 'OutcomeQualityStageExecution', Stage).findOne({ ...nativeScope,
-    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] }), session), 'RECOVERY_PRIOR_STAGE_EXISTS')
+  need(!await query(model(deps, 'OutcomeQualityStageExecution', Stage).findOne(originalOutcomeQualityStageFilter({ ...nativeScope,
+    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] })), session), 'RECOVERY_PRIOR_STAGE_EXISTS')
   for (const [name, fallback, prefix, expected] of [
     ['GovernedReasoningExecution', Grr, 'executionEvidence.syntheticClassification.', source.ref.executionHash],
     ['GovernedRuntimeArtifact', Artifact, 'lineageSummary.syntheticClassification.', source.ref.artifactHash],
@@ -628,8 +629,8 @@ const draftPersistenceSource = async (args, auth, expected, session = null) => {
 }
 const assertDraftRetryHistory = async (args, plan, source, session) => {
   const deps = args.deps || {}, nativeScope = scope(args.runtimeInstanceId)
-  const rows = await query(model(deps, 'OutcomeQualityStageExecution', Stage).find({ ...nativeScope,
-    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] }).limit(4), session)
+  const rows = await query(model(deps, 'OutcomeQualityStageExecution', Stage).find(originalOutcomeQualityStageFilter({ ...nativeScope,
+    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] })).limit(4), session)
   need(rows.length === source.historyRefs.length && rows.every(row => source.historyRefs.some(ref => membershipHash(stageRef(serializeOutcomeQualityStageExecution(row))) === membershipHash(ref))), 'DRAFT_RETRY_EXTRA_STAGE_HISTORY')
   const sources = [source.saved, ...(source.draftSaved ? [source.draftSaved] : [])]
   for (const [name, fallback, prefix, key] of [
@@ -744,8 +745,8 @@ const transportSource = async (args, auth, expected, session = null) => {
 }
 const assertCompositionHistory = async (args, plan, source, session) => {
   const deps = args.deps || {}, nativeScope = scope(args.runtimeInstanceId)
-  const rows = await query(model(deps, 'OutcomeQualityStageExecution', Stage).find({ ...nativeScope,
-    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] }).limit(source.historyRefs.length + 1), session)
+  const rows = await query(model(deps, 'OutcomeQualityStageExecution', Stage).find(originalOutcomeQualityStageFilter({ ...nativeScope,
+    $or: [{ requestId: plan.requestId }, { planId: plan.planId }] })).limit(source.historyRefs.length + 1), session)
   need(rows.length === source.historyRefs.length && rows.every(row => source.historyRefs.some(ref => membershipHash(stageRef(serializeOutcomeQualityStageExecution(row))) === membershipHash(ref))), 'COMPOSITION_EXTRA_STAGE_HISTORY')
   for (const [name, fallback, prefix, key] of [['GovernedReasoningExecution', Grr, 'executionEvidence.syntheticClassification.', 'executionHash'], ['GovernedRuntimeArtifact', Artifact, 'lineageSummary.syntheticClassification.', 'artifactHash']]) {
     const values = await query(model(deps, name, fallback).find({ ...nativeScope, $or: [{ [`${prefix}requestId`]: plan.requestId }, { [`${prefix}planId`]: plan.planId }] }).limit(source.priorProviderRefs.length + 1), session)

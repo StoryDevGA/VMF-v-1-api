@@ -1,4 +1,5 @@
 import dotenv from 'dotenv'
+import { strictOptionalBoolean } from './developmentStartupPolicy.js'
 import { validateEnvironment } from './environmentValidation.js'
 import { parseAuditSigningConfig } from './auditSigningConfig.js'
 
@@ -61,6 +62,11 @@ const env = {
   appEnv: normalizeAppEnv(process.env.APP_ENV, process.env.NODE_ENV || 'development'),
   port: toNumber(process.env.PORT, 8000),
   appVersion: process.env.APP_VERSION || '0.1.0',
+  controlledDocxReadCorrectionEnabled: strictOptionalBoolean(process.env.CONTROLLED_DOCX_READ_CORRECTION_ENABLED, false, 'CONTROLLED_DOCX_READ_CORRECTION_ENABLED'),
+  controlledDocxReadApprovedEnabled: strictOptionalBoolean(process.env.CONTROLLED_DOCX_READ_APPROVED_ENABLED, false, 'CONTROLLED_DOCX_READ_APPROVED_ENABLED'),
+  controlledDocxReadNarrowEnabled: strictOptionalBoolean(process.env.CONTROLLED_DOCX_READ_NARROW_ENABLED, false, 'CONTROLLED_DOCX_READ_NARROW_ENABLED'),
+  controlledDocxReadEnabled: strictOptionalBoolean(process.env.CONTROLLED_DOCX_READ_ENABLED, false, 'CONTROLLED_DOCX_READ_ENABLED'),
+  developmentStartupTasksEnabled: strictOptionalBoolean(process.env.DEVELOPMENT_STARTUP_TASKS_ENABLED, true, 'DEVELOPMENT_STARTUP_TASKS_ENABLED'),
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGIN),
   rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 300),

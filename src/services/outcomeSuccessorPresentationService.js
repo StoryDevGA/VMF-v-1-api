@@ -1,3 +1,4 @@
+import { originalOutcomeQualityStageFilter } from '../utils/outcomeQualityStageSubjects.js'
 import { OutcomeAsset, OutcomeAssetVersion, OutcomeSession, OutcomeDraft, OutcomeDraftIteration,
   OutcomeKnowledgeCompositionPlan, OutcomeSuccessorOperation, OutcomeMessage, OutcomeQualityStageExecution } from '../models/index.js'
 import { getRuntimeInstance, assertRuntimePermission } from './runtimeInstanceService.js'
@@ -238,8 +239,8 @@ export const getOutcomeSuccessorCompare = async (args) => {
   const message = await lookup(OutcomeMessage, { ...scope, sessionId: operation.refs.sessionId, messageId: operation.refs.messageId,
     role: 'USER', 'contextBindings.requestPlan.requestId': operation.requestId, 'contextBindings.requestPlan.planId': operation.refs.planId })
   if (!plan || !message) throw outcomeSuccessorError('OUTCOME_SUCCESSOR_RESULT_LINEAGE_INVALID')
-  const stages = await (deps.readStages || ((filter) => OutcomeQualityStageExecution.find(filter).maxTimeMS(2000).lean()))({
-    ...scope, requestId: operation.requestId, planId: operation.refs.planId })
+  const stages = await (deps.readStages || ((filter) => OutcomeQualityStageExecution.find(filter).maxTimeMS(2000).lean()))(originalOutcomeQualityStageFilter({
+    ...scope, requestId: operation.requestId, planId: operation.refs.planId }))
   ;(deps.validateQualityChain || validateOutcomeGovernedQualityChain)({ plan,
     styleSource: await loadOutcomeGovernedQualityChainStyleSource({ plan, stages, loadPackContent: deps.loadPackContent }),
     requestBinding: { requestId: operation.requestId, draftId: draft.draftId, draftIterationId: iteration.draftIterationId },

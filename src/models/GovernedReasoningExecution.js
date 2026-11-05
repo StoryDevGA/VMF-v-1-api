@@ -1,4 +1,12 @@
 import mongoose from 'mongoose'
+import { COMPLETED_REVIEW_STATUS, hasCompletedReviewIdentity, assertCompletedReviewResult, completedResultFilter, carriesCompletedReviewValue } from '../services/masterLinkedCompletedReviewContract.js'
+import { G1_VERSION, G1_OUTPUT, G1_STATUSES, hasG1Identity, assertG1Record } from '../services/masterLinkedGenuineReviewContract.js'
+import { MASTER_SIMULATION_VERSION, MASTER_SIMULATION_OUTPUT, MASTER_SIMULATION_STATUSES,
+  hasMasterReviewSimulationIdentity, assertMasterReviewSimulationRecord } from '../services/masterLinkedReviewSimulationContract.js'
+import { RENDITION_CLAIM_VERSION, RENDITION_CLAIM_STATUS, hasRenditionClaimIdentity,
+  RENDITION_DISPATCH_VERSION, RENDITION_DISPATCH_STATUS, RENDITION_RESULT_VERSION, RENDITION_RESULT_STATUS, assertRenditionClaimRecord, renditionClaimError } from '../services/outcomeRenditionReviewClaimContract.js'
+import { assertRenditionDispatchRecord } from '../services/outcomeRenditionReviewDispatchContract.js'
+import { assertRenditionResultRecord } from '../services/outcomeRenditionReviewResultContract.js'
 import {
   GRR_CONTRACT_VERSION,
   GRR_EXECUTION_STATUSES,
@@ -121,7 +129,7 @@ const governedReasoningExecutionSchema = new mongoose.Schema(
       type: String,
       required: true,
       uppercase: true,
-      enum: Object.values(GRR_EXECUTION_STATUSES),
+      enum: [...Object.values(GRR_EXECUTION_STATUSES), RENDITION_CLAIM_STATUS, RENDITION_DISPATCH_STATUS, RENDITION_RESULT_STATUS, ...Object.values(MASTER_SIMULATION_STATUSES), ...Object.values(G1_STATUSES), COMPLETED_REVIEW_STATUS],
       default: GRR_EXECUTION_STATUSES.COMPLETED,
       index: true,
     },
@@ -252,7 +260,86 @@ governedReasoningExecutionSchema.pre('validate', function normalizeGovernedReaso
   this.limitations = Array.isArray(this.limitations)
     ? this.limitations.map((item) => String(item || '').trim()).filter(Boolean)
     : []
+  try {
+    if (hasCompletedReviewIdentity(this.toObject())) assertCompletedReviewResult(this.toObject())
+    else if (hasG1Identity(this.toObject())) assertG1Record(this.toObject())
+    else if (hasMasterReviewSimulationIdentity(this.toObject())) assertMasterReviewSimulationRecord(this.toObject())
+    else if (hasRenditionClaimIdentity(this.toObject())) {
+      if (this.contractVersion === RENDITION_RESULT_VERSION) assertRenditionResultRecord(this.toObject())
+      else if (this.contractVersion === RENDITION_DISPATCH_VERSION) assertRenditionDispatchRecord(this.toObject())
+      else assertRenditionClaimRecord(this.toObject())
+    }
+  }
+  catch (error) { return next(error) }
   next()
+})
+
+governedReasoningExecutionSchema.pre('save', async function protectClaimSave() {
+  // Creation through save({validateBeforeSave:false}) cannot bypass the new
+  // simulation discriminator contract either.
+  if (this.isNew && hasMasterReviewSimulationIdentity(this.toObject())) assertMasterReviewSimulationRecord(this.toObject())
+  if (this.isNew && hasG1Identity(this.toObject())) assertG1Record(this.toObject())
+  if (this.isNew && hasCompletedReviewIdentity(this.toObject())) assertCompletedReviewResult(this.toObject())
+  if (!this.isNew) {
+    let query = this.constructor.exists({ $and: [{ _id: this._id }, claimFilter] })
+    if (this.$session()) query = query.session(this.$session())
+    if (hasCompletedReviewIdentity(this.toObject()) || hasG1Identity(this.toObject()) || hasRenditionClaimIdentity(this.toObject()) || hasMasterReviewSimulationIdentity(this.toObject()) || await query) throw renditionClaimError('CLAIM_IMMUTABLE')
+  }
+})
+// Test the stored discriminator as well as the proposed update. Removing it must
+// never make an existing claim mutable through an ordinary GRR update path.
+const reservedUpdate = value => carriesCompletedReviewValue(value) || value && typeof value === 'object' && (hasG1Identity(value) || hasRenditionClaimIdentity(value) || hasMasterReviewSimulationIdentity(value)
+  || Object.entries(value).some(([key, entry]) => key.startsWith('executionEvidence.masterDocxDispatch') || key.startsWith('executionEvidence.renditionReview') || key.startsWith('executionEvidence.masterLinkedReview')
+    || reservedUpdate(entry)))
+const reservedPath = path => typeof path === 'string' && ['contractVersion', 'outputTypeKey', 'status', 'idempotencyKey', 'executionEvidence']
+  .some(key => path === key || path.startsWith(`${key}.`))
+const unsafeUpdate = update => reservedUpdate(update) || (Array.isArray(update)
+  ? update.some(stage => Object.entries(stage).some(([operator, fields]) => !['$set', '$addFields', '$unset', '$project'].includes(operator)
+    || (operator !== '$unset' && Object.keys(fields || {}).some(reservedPath))))
+  : Object.values(update?.$rename || {}).some(reservedPath))
+const claimFilter = { $or: [...completedResultFilter.$or, { contractVersion: { $in: [RENDITION_CLAIM_VERSION, RENDITION_DISPATCH_VERSION, RENDITION_RESULT_VERSION, MASTER_SIMULATION_VERSION, G1_VERSION] } },
+  { status: { $in: [RENDITION_CLAIM_STATUS, RENDITION_DISPATCH_STATUS, RENDITION_RESULT_STATUS, ...Object.values(MASTER_SIMULATION_STATUSES), ...Object.values(G1_STATUSES)] } },
+  { outputTypeKey: G1_OUTPUT }, { idempotencyKey: /^SS055_(NARROW_GENUINE|APPROVED_GENUINE|APPROVED_NETWORK_QA|CATEGORY_GENUINE|CATEGORY_NETWORK_QA|CORRECTED_GENUINE|CORRECTED_NETWORK_QA|NETWORK_QA|SINGLE_GENUINE)_DOCX:/ }, { 'executionEvidence.masterDocxDispatch': { $exists: true } },
+  { outputTypeKey: MASTER_SIMULATION_OUTPUT }, { idempotencyKey: /^MASTER_REVIEW_SIMULATED:/ }, { 'executionEvidence.masterLinkedReview': { $exists: true } },
+  { outputTypeKey: 'RENDITION_RENDERED_EXPRESSION_RL' }, { idempotencyKey: /^DOCX_RENDITION_REVIEW(?::|_DISPATCH:|_RESULT:)/ },
+  { 'executionEvidence.renditionReview': { $exists: true } }] }
+const withoutClaims = filter => ({ $and: [filter, { $nor: [claimFilter] }] })
+for (const operation of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace', 'deleteOne', 'deleteMany', 'findOneAndDelete']) {
+  governedReasoningExecutionSchema.pre(operation, async function protectClaimQuery() {
+    if (unsafeUpdate(this.getUpdate?.())) throw renditionClaimError('CLAIM_IMMUTABLE')
+    const filter = this.getFilter()
+    if (this.getOptions().upsert && carriesCompletedReviewValue(filter)) throw renditionClaimError('CLAIM_IMMUTABLE')
+    let query = this.model.exists({ $and: [filter, claimFilter] })
+    if (this.getOptions().session) query = query.session(this.getOptions().session)
+    if (await query) throw renditionClaimError('CLAIM_IMMUTABLE')
+    // The read above provides an explicit error for existing claims. This
+    // predicate is the atomic protection against a claim committed after it.
+    this.setQuery(withoutClaims(filter))
+  })
+}
+governedReasoningExecutionSchema.pre('deleteOne', { document: true, query: false }, async function protectClaimDelete() {
+  let query = this.constructor.exists({ $and: [{ _id: this._id }, claimFilter] })
+  if (this.$session()) query = query.session(this.$session())
+  if (hasCompletedReviewIdentity(this.toObject()) || hasG1Identity(this.toObject()) || hasRenditionClaimIdentity(this.toObject()) || hasMasterReviewSimulationIdentity(this.toObject()) || await query) throw renditionClaimError('CLAIM_IMMUTABLE')
+})
+governedReasoningExecutionSchema.pre('insertMany', function protectClaimInsertMany(next, records) {
+  next(records.some(row => hasCompletedReviewIdentity(row) || hasG1Identity(row) || hasRenditionClaimIdentity(row) || hasMasterReviewSimulationIdentity(row)) ? renditionClaimError('CLAIM_BULK_INSERT_UNSUPPORTED') : undefined)
+})
+governedReasoningExecutionSchema.pre('bulkWrite', async function protectClaimBulk(next, operations, options) {
+  try {
+    for (const operation of operations) {
+      const action = Object.values(operation)[0]
+      if (unsafeUpdate(action?.document) || unsafeUpdate(action?.update) || unsafeUpdate(action?.replacement)) throw renditionClaimError('CLAIM_IMMUTABLE')
+      if (action?.filter) {
+        if (action.upsert && carriesCompletedReviewValue(action.filter)) throw renditionClaimError('CLAIM_IMMUTABLE')
+        let query = this.exists({ $and: [action.filter, claimFilter] })
+        if (options?.session) query = query.session(options.session)
+        if (await query) throw renditionClaimError('CLAIM_IMMUTABLE')
+        action.filter = withoutClaims(action.filter)
+      }
+    }
+    next()
+  } catch (error) { next(error) }
 })
 
 const GovernedReasoningExecution = mongoose.model('GovernedReasoningExecution', governedReasoningExecutionSchema)

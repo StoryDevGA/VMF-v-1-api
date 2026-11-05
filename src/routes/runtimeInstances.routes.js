@@ -3,7 +3,7 @@ import { readSyntheticTestDisposition, saveSyntheticTestDisposition, readSynthet
   saveSyntheticTestCompletion } from '../controllers/syntheticTestDisposition.controller.js'
 import { validateSyntheticTestDispositionBody } from '../validators/syntheticTestDisposition.validator.js'
 import { inspectIsolatedSyntheticOutcomeEndpoint, planIsolatedSyntheticOutcomeEndpoint, confirmIsolatedSyntheticOutcomePlanEndpoint,
-  executeIsolatedSyntheticOutcomeEndpoint, readIsolatedSyntheticOutcomeEndpoint, completeIsolatedSyntheticOutcomeEndpoint } from '../controllers/isolatedSyntheticOutcome.controller.js'
+  executeIsolatedSyntheticOutcomeEndpoint, readIsolatedSyntheticOutcomeEndpoint, readOutcomeDocxRenditionSourceEndpoint, completeIsolatedSyntheticOutcomeEndpoint } from '../controllers/isolatedSyntheticOutcome.controller.js'
 import { validateIsolatedSyntheticScope, validateIsolatedSyntheticPlan, validateIsolatedSyntheticConfirm,
   validateIsolatedSyntheticExecute, validateIsolatedSyntheticRequestParams, validateIsolatedSyntheticComplete } from '../validators/isolatedSyntheticOutcome.validator.js'
 import { preflightOutcomeSuccessor, confirmRuntimeOutcomeSuccessor, createRuntimeOutcomeSuccessor,
@@ -19,6 +19,10 @@ import { validateEvidenceDraftQualification } from '../validators/runtimeInstanc
 import { validateRecordSourceVerification, validateSourceVerificationParams } from '../validators/runtimeInstance.validator.js'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
+import { createPrivateDocxCandidateEndpoint, readPrivateDocxCandidateEndpoint, readPrivateDocxCandidateFileEndpoint, listCurrentPrivateDocxCandidatesEndpoint } from '../controllers/outcomeDocxCandidate.controller.js'
+import { validatePrivateDocxCandidateCreate, validatePrivateDocxCandidateParams } from '../validators/outcomeDocxCandidate.validator.js'
+import { createDocxPagePreviewEndpoint, readCurrentDocxPagePreviewEndpoint, readDocxPagePreviewEndpoint, readDocxPagePreviewBundleEndpoint, readCurrentDocxPagePreviewBundleEndpoint } from '../controllers/outcomeDocxPagePreview.controller.js'
+import { validateDocxPagePreviewCreate, validateDocxPagePreviewParams } from '../validators/outcomeDocxPagePreview.validator.js'
 import { readReviewCompletion, recordReviewCompletion, readPublishedDispositionRecovery, recordSupplementalPublishedDisposition,
   readSupplementalFindingReview, recordSupplementalFinding, readRuntimeProductAuthority, recordRuntimeProductAuthority,
   readEvidenceSnapshotRecovery, recordEvidenceSnapshotRecovery } from '../controllers/reviewCompletion.controller.js'
@@ -215,6 +219,16 @@ router.post('/:runtimeInstanceId/synthetic-outcome/requests/:requestId/confirm',
 router.post('/:runtimeInstanceId/synthetic-outcome/execute', vmfManagementRateLimit, validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateIsolatedSyntheticExecute, executeIsolatedSyntheticOutcomeEndpoint)
 router.post('/:runtimeInstanceId/synthetic-outcome/complete', vmfManagementRateLimit, validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateIsolatedSyntheticComplete, completeIsolatedSyntheticOutcomeEndpoint)
 router.get('/:runtimeInstanceId/synthetic-outcome/run', validateRuntimeInstanceId, validateIsolatedSyntheticScope, readIsolatedSyntheticOutcomeEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-rendition-source', validateRuntimeInstanceId, validateIsolatedSyntheticScope, readOutcomeDocxRenditionSourceEndpoint)
+router.post('/:runtimeInstanceId/outcome-studio/docx-candidates', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateCreate, createPrivateDocxCandidateEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates', validateRuntimeInstanceId, validateIsolatedSyntheticScope, listCurrentPrivateDocxCandidatesEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateParams, readPrivateDocxCandidateEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/file', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateParams, readPrivateDocxCandidateFileEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/page-preview-bundle', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateParams, readCurrentDocxPagePreviewBundleEndpoint)
+router.post('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/page-previews', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateParams, validateDocxPagePreviewCreate, createDocxPagePreviewEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/page-previews', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validatePrivateDocxCandidateParams, readCurrentDocxPagePreviewEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/page-previews/:previewId', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateDocxPagePreviewParams, readDocxPagePreviewEndpoint)
+router.get('/:runtimeInstanceId/outcome-studio/docx-candidates/:candidateId/page-previews/:previewId/bundle', validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateDocxPagePreviewParams, readDocxPagePreviewBundleEndpoint)
 router.get('/:runtimeInstanceId/synthetic-test-disposition', validateRuntimeInstanceId, validateReviewCompletionScope, readSyntheticTestDisposition)
 router.post('/:runtimeInstanceId/synthetic-test-disposition', validateRuntimeInstanceId, validateReviewCompletionScope, validateSyntheticTestDispositionBody, saveSyntheticTestDisposition)
 router.get('/:runtimeInstanceId/synthetic-test-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readSyntheticTestCompletion)

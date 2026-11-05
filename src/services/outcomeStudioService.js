@@ -1,3 +1,4 @@
+import { originalOutcomeQualityStageFilter } from '../utils/outcomeQualityStageSubjects.js'
 import { assertNormalOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
 import { createHash, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
@@ -7557,11 +7558,11 @@ export const persistGovernedQualityDraft = async ({
     }
   }
   const stageHistory = stages.some((stage) => Number(stage.attemptNumber) > 1)
-    ? await OutcomeQualityStageExecution.find({
+    ? await OutcomeQualityStageExecution.find(originalOutcomeQualityStageFilter({
         runtimeInstanceId, customerId: plan.customerId, tenantId: plan.tenantId,
         requestId: requestBinding.requestId, planId: plan.planId,
         draftId: requestBinding.draftId, draftIterationId: requestBinding.draftIterationId,
-      }).sort({ stageOrder: 1, attemptNumber: 1 }).lean()
+      })).sort({ stageOrder: 1, attemptNumber: 1 }).lean()
     : stages
   const styleSource = await loadOutcomeGovernedQualityChainStyleSource({ plan, stages: stageHistory })
   const qualityChain = buildGovernedQualityChainManifest({ plan, requestBinding, stages, stageHistory, styleSource })

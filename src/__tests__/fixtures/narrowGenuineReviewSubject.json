@@ -1,0 +1,229 @@
+{
+  "subject": {
+    "contractVersion": "master-linked-docx-review-subject.v5",
+    "actorUserId": "6a6c763dcace7a21bd41efa9",
+    "binding": {
+      "contractVersion": "master-linked-docx-review-binding.v4",
+      "candidateId": "docx_candidate_f032af3b-ad37-492a-ab38-9abbc7d4caeb",
+      "candidateBodyFingerprint": "ffbc3bdf8d5efb05d66239287dc8c2102b366a986fe8f93f3b0445a3d5484f30",
+      "masterReference": {
+        "storageId": "6ae391015d71cde1230052af",
+        "masterId": "meaning_master_7f34d431-6640-482e-8695-75cd6f76883c",
+        "version": 1,
+        "scope": {
+          "tenantId": "6a6c76e3cace7a21bd41eff9",
+          "customerId": "6a6c75f2cace7a21bd41ef98",
+          "runtimeInstanceId": "6ad715c91f39fea112115875"
+        },
+        "bodyFingerprint": "9fa90c527e0f797223d12997136d702e617232f22aac7e7f1b64846688f43581",
+        "sourceFingerprint": "51cc8bf0b164db4e60438cb1559e62bf9a19b3cb2ebff4ffb0522f3ea57a9891",
+        "sourceProjectionFingerprint": "f19cee55729177ec3a64df33835b5f70f9b215e958df7e71b85f3e45fddb0e96",
+        "auditId": "6ae391015d71cde1230052b0",
+        "auditSignatureVersion": 3
+      },
+      "masterBindingFingerprint": "da7485943665ddd05299dac308f9e3fbae9e71402e492a37fcc9e1f87c9a9746",
+      "sourceFingerprint": "51cc8bf0b164db4e60438cb1559e62bf9a19b3cb2ebff4ffb0522f3ea57a9891",
+      "inputFingerprint": "685261ae0e443e30032cf943195045fe2fe91ceffd8652389037a7f5f1523d0d",
+      "docxChecksum": "sha256:79525d457a1f5deb0460ac3dfcf6731d60b65c0e18ae433e7685661c947909f5",
+      "renderer": {
+        "key": "governed-source-private-docx",
+        "version": "0.1.5",
+        "format": "DOCX",
+        "qualificationPolicy": "SOURCE_QUALIFICATION_PARAGRAPHS_V2",
+        "layoutProfile": "SOURCE_SCOPED_QUOTATIONS_V2",
+        "presentationProfile": "CUSTOMER_DOCUMENT_V1",
+        "engine": {
+          "key": "DOCX_JS_IN_PROCESS_ENGINEERING_CANDIDATE",
+          "version": "docx@9.7.1"
+        },
+        "supportedComponents": [
+          "HEADING",
+          "PARAGRAPH",
+          "LIST",
+          "TABLE",
+          "CALLOUT"
+        ],
+        "scope": "PRIVATE_NON_AUTHORITATIVE_IN_MEMORY_ONLY"
+      },
+      "previewId": "docx_preview_8e2359c4-eafb-4c4f-bc39-05d081e68dd2",
+      "conversionFingerprint": "d84fa41fa7679c0a10d2356b94392c1b938793cda36f6a166d681c82edf9eb61",
+      "runtimeFingerprint": "96cd2fbf9fe13151d7f2cc05965e3e71ea339fb633cd24880f2cb4decee5d8a9",
+      "pages": [
+        {
+          "number": 1,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 344421,
+          "sha256": "e6a5eaf74fc1686b72a1c7ff0d2bdd457814de00a5a1baa166352aec2b21847b"
+        },
+        {
+          "number": 2,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 401293,
+          "sha256": "7c6033c6f7aae9ce19e3f40b5b802bfb150ed4f22534957022e37cbe5b70ff1a"
+        },
+        {
+          "number": 3,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 388118,
+          "sha256": "1f81e59a08d99418eed405feda41a82d9e53b104f5ce527455662a5eb4410353"
+        },
+        {
+          "number": 4,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 340137,
+          "sha256": "e1845acde655e01ea59b1f30e667fdb2facc04510b80e675c7b5820052f0b614"
+        },
+        {
+          "number": 5,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 415219,
+          "sha256": "cbc3a1be1b7002f307ac5f524f1a86d0e260c0614dd2c3339c5f05cb283f25b0"
+        },
+        {
+          "number": 6,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 429214,
+          "sha256": "b352274946ab406d935c6b255a00293f553d5c1d89287297431a54bd2ea4d3f6"
+        },
+        {
+          "number": 7,
+          "width": 1275,
+          "height": 1651,
+          "byteLength": 366313,
+          "sha256": "a5c7d97f10ee3f9017651b743700bfa6c2c8f214a9ec1906b22e017a468c8308"
+        }
+      ],
+      "compatibilityReference": {
+        "version": "commercial-docx-approved-expression.v2",
+        "auditId": "a83de300505c1fd0b7e2475a",
+        "decisionFingerprint": "8321bd230e8dadebdf42a0f930805777e0283d496b9c332d87d21135714096eb",
+        "sourceFingerprint": "51cc8bf0b164db4e60438cb1559e62bf9a19b3cb2ebff4ffb0522f3ea57a9891",
+        "mappingFingerprint": "1eba75bae0dbc0ccdc15e952ceb73096076403ee27deb3caa24bb5afd28852b4",
+        "masterId": "meaning_master_7f34d431-6640-482e-8695-75cd6f76883c",
+        "predecessorCandidateId": "docx_candidate_c396012f-ebf6-4da0-b4e8-71580a359024",
+        "failedReviewExecutionId": "master_docx_result_e48bc46a3945d8cf1beb9e8f81122f976f10ad97",
+        "failedReviewResultFingerprint": "8786c37149698a90b905916a871bcc590a3e285dcce2d8c5fc427336b0fa2167",
+        "section13State": "DESCRIPTIVE_NO_OPERATIONAL_AUTHORITY_CONTROLLED_TEST_ONLY"
+      }
+    },
+    "policy": {
+      "policyVersion": "controlled-narrow-expression-review-preparation.v1",
+      "operation": "PREPARE_PROVIDER_REVIEW_INPUT",
+      "actorUserId": "6a6c763dcace7a21bd41efa9",
+      "scope": {
+        "tenantId": "6a6c76e3cace7a21bd41eff9",
+        "customerId": "6a6c75f2cace7a21bd41ef98",
+        "runtimeInstanceId": "6ad715c91f39fea112115875"
+      },
+      "permittedUse": "ISOLATED_ENGINEERING_TEST_ONLY",
+      "classification": "NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST",
+      "decision": "PREPARATION_ONLY",
+      "capability": "BUILD_PROVIDER_SAFE_REQUEST",
+      "bindingFingerprint": "a45afdfbb415877f3c9d96d76da48e07a18a110e805c75a5a5d14087f7e42333",
+      "transport": {
+        "provider": "OPENAI",
+        "model": "gpt-5.2",
+        "configurationVersion": "MASTER_LINKED_NARROW_EXPRESSION_PREPARATION_V1",
+        "contextVersion": "master-linked-narrow-expression-visual-review.v1"
+      },
+      "compatibilityReference": {
+        "version": "commercial-docx-approved-expression.v2",
+        "auditId": "a83de300505c1fd0b7e2475a",
+        "decisionFingerprint": "8321bd230e8dadebdf42a0f930805777e0283d496b9c332d87d21135714096eb",
+        "sourceFingerprint": "51cc8bf0b164db4e60438cb1559e62bf9a19b3cb2ebff4ffb0522f3ea57a9891",
+        "mappingFingerprint": "1eba75bae0dbc0ccdc15e952ceb73096076403ee27deb3caa24bb5afd28852b4",
+        "masterId": "meaning_master_7f34d431-6640-482e-8695-75cd6f76883c",
+        "predecessorCandidateId": "docx_candidate_c396012f-ebf6-4da0-b4e8-71580a359024",
+        "failedReviewExecutionId": "master_docx_result_e48bc46a3945d8cf1beb9e8f81122f976f10ad97",
+        "failedReviewResultFingerprint": "8786c37149698a90b905916a871bcc590a3e285dcce2d8c5fc427336b0fa2167",
+        "section13State": "DESCRIPTIVE_NO_OPERATIONAL_AUTHORITY_CONTROLLED_TEST_ONLY"
+      },
+      "schemaContentComplete": false,
+      "unresolvedFacts": [
+        "NEXT_PERMITTED_OPERATIONAL_STEP",
+        "EXECUTION_APPROVER"
+      ],
+      "authoritative": false,
+      "officialUse": false,
+      "normalOutputAvailable": false,
+      "authorisesApproval": false,
+      "finalisationAvailable": false,
+      "deliveryAvailable": false,
+      "dispatchAvailable": false,
+      "externalDisclosureAvailable": false
+    },
+    "policyFingerprint": "f47a98837661ac794e0050bd1ae3f3d35e6c1ea4b2b6bcad29680411d72093b7",
+    "method": {
+      "contractVersion": "outcome-studio.method-document.v1",
+      "role": "RL",
+      "boundary": "POST_GENERATION_VALIDATION",
+      "packId": "kp-rl-rl-v3-0-natural-prose-rendering-preservation-extension",
+      "packKey": "rl-v3-0-natural-prose-rendering-preservation-extension",
+      "versionId": "kpv-rl-rl-v3-0-natural-prose-rendering-preservation-extension-1-0-0-global",
+      "semanticVersion": "1.0.0",
+      "contentHash": "sha256:e6afc91cca2654612b5e9cb2c0dfb185be687b98941c5cc3a01fbd55ab8b35ad",
+      "contentFormat": "MARKDOWN",
+      "characterCount": 77621,
+      "byteCount": 78177,
+      "chunkCount": 10
+    },
+    "packs": {
+      "OUTPUT_TYPE": {
+        "packId": "kp-output-type-definition-commercial-strategy-and-decision-paper",
+        "versionId": "kpv-output-type-definition-commercial-strategy-and-decision-paper-1-0-1-global",
+        "activationId": "kpa-output-type-definition-commercial-strategy-and-decision-paper-kpv-output-type-definition-commercial-strategy-and-decision-paper-1-0-1-global-global",
+        "contentHash": "sha256:45dd0c69274e4bb7e3eba7e760aa93c5f7e55b3bde1bece86ab5e46774b6e81e"
+      },
+      "OUTPUT_SCHEMA": {
+        "packId": "kp-output-schema-commercial-strategy-and-decision-paper-schema",
+        "versionId": "kpv-output-schema-commercial-strategy-and-decision-paper-schema-1-0-1-global",
+        "activationId": "kpa-output-schema-commercial-strategy-and-decision-paper-schema-kpv-output-schema-commercial-strategy-and-decision-paper-schema-1-0-1-global-global",
+        "contentHash": "sha256:ab42b148568c86edd589a78984e0d094ca773216174617a611d668373f1fd33c"
+      },
+      "AUDIENCE": {
+        "packId": "kp-audience-executive-leadership-team",
+        "versionId": "kpv-audience-executive-leadership-team-1-0-0-global",
+        "activationId": "kpa-audience-executive-leadership-team-kpv-audience-executive-leadership-team-1-0-0-global-global",
+        "contentHash": "sha256:46dc92ec1ca61385438ce0331a7be1761ac6345c9736c9a415d9870ed25e8ad5"
+      },
+      "STYLE": {
+        "packId": "kp-style-strategic-advisory-style",
+        "versionId": "kpv-style-strategic-advisory-style-1-0-0-global",
+        "activationId": "kpa-style-strategic-advisory-style-kpv-style-strategic-advisory-style-1-0-0-global-global",
+        "contentHash": "sha256:a92a3aec10c626c57d507becec5aa615238c7f73fea2f44318793020f8d4a128"
+      },
+      "VISUAL_SYSTEM": {
+        "packId": "kp-visual-system-executive-consulting-visual-style",
+        "versionId": "kpv-visual-system-executive-consulting-visual-style-0-1-0-global",
+        "activationId": "kpa-visual-system-executive-consulting-visual-style-kpv-visual-system-executive-consulting-visual-style-0-1-0-global-global",
+        "contentHash": "sha256:cbb59df01288dcf3210237e456fb8a4b0113f4e86e3da3d31558c7b153faee91"
+      }
+    },
+    "transport": {
+      "provider": "OPENAI",
+      "model": "gpt-5.2",
+      "configurationVersion": "MASTER_LINKED_NARROW_EXPRESSION_PREPARATION_V1",
+      "contextVersion": "master-linked-narrow-expression-visual-review.v1"
+    },
+    "authoritative": false,
+    "officialUse": false,
+    "normalOutputAvailable": false,
+    "authorisesApproval": false,
+    "finalisationAvailable": false,
+    "deliveryAvailable": false,
+    "dispatchAvailable": false,
+    "externalDisclosureAvailable": false
+  },
+  "request": {
+    "requestIdentity": "4a9aa05d3bddb551c5e631f0b56855482f2aa55767dfa8fe7bf65c8f42c366a2",
+    "subjectFingerprint": "eeee97c7ee711408eb7b88fa3cd3eced82a6bb0ce2a09a46ed977774d515cce5",
+    "contextFingerprint": "2031063332a36ec69625dd2580ef38dda5be410ea2d382710677a744db9d4fc6",
+    "policyFingerprint": "f47a98837661ac794e0050bd1ae3f3d35e6c1ea4b2b6bcad29680411d72093b7"
+  }
+}

@@ -1,4 +1,7 @@
 import mongoose from 'mongoose'
+import { hasTestRenditionProbeIdentity, assertTestRenditionProbeArtifact, testRenditionProbeFilter, carriesTestRenditionProbeValue } from '../services/masterLinkedTestRenditionContract.js'
+import { hasCompletedArtifactIdentity, assertCompletedReviewArtifact, completedArtifactFilter, carriesCompletedReviewValue } from '../services/masterLinkedCompletedReviewContract.js'
+import { assertRenditionReviewArtifact, hasRenditionReviewArtifactIdentity, reservedRenditionArtifactFilter, renditionResultError } from '../services/outcomeRenditionReviewResultContract.js'
 import {
   GRR_ARTIFACT_STATUSES,
   GRR_CONTRACT_VERSION,
@@ -94,6 +97,11 @@ const governedRuntimeArtifactSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    testRenditionFileBytes: {
+      type: Buffer,
+      select: false,
+      default: undefined,
+    },
     safeJson: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -139,6 +147,7 @@ const governedRuntimeArtifactSchema = new mongoose.Schema(
         ret.id = String(ret._id)
         delete ret._id
         delete ret.__v
+        delete ret.testRenditionFileBytes
         return ret
       },
     },
@@ -165,7 +174,71 @@ governedRuntimeArtifactSchema.pre('validate', function normalizeGovernedRuntimeA
   this.limitations = Array.isArray(this.limitations)
     ? this.limitations.map((item) => String(item || '').trim()).filter(Boolean)
     : []
+  try {
+    if (hasTestRenditionProbeIdentity(this.toObject())) assertTestRenditionProbeArtifact(this.toObject())
+    else if (hasCompletedArtifactIdentity(this.toObject())) assertCompletedReviewArtifact(this.toObject())
+    else if (hasRenditionReviewArtifactIdentity(this.toObject())) assertRenditionReviewArtifact(this.toObject())
+  }
+  catch (error) { return next(error) }
   next()
+})
+
+const immutable = () => renditionResultError('REVIEW_ARTIFACT_IMMUTABLE')
+const protectedReviewFilter = { $or: [reservedRenditionArtifactFilter, completedArtifactFilter, testRenditionProbeFilter] }
+const withoutReview = filter => ({ $and: [filter, { $nor: [protectedReviewFilter] }] })
+const reservedPath = value => typeof value === 'string' && ['contractVersion', 'artifactType', 'outputTypeKey', 'runtimeArtifactId', 'lineageSummary', 'testRenditionFileBytes']
+  .some(field => value === field || value.startsWith(`${field}.`))
+const reservedUpdate = value => carriesTestRenditionProbeValue(value) || carriesCompletedReviewValue(value) || (typeof value === 'string'
+  ? value.trim() === 'outcome-rendition-review-artifact.v1' || ['DOCX_RENDITION_REVIEW', 'RENDITION_RENDERED_EXPRESSION_RL'].includes(value.trim().toUpperCase())
+    || value.trim().startsWith('artifact_rendition_review_')
+  : value && typeof value === 'object' && (hasRenditionReviewArtifactIdentity(value)
+    || Object.entries(value).some(([field, child]) => field.startsWith('lineageSummary.renditionReview') || reservedUpdate(child))))
+const unsafe = update => reservedUpdate(update) || (Array.isArray(update)
+  ? update.some(stage => Object.entries(stage).some(([operator, fields]) => !['$set', '$addFields', '$unset', '$project'].includes(operator)
+    || (operator !== '$unset' && Object.keys(fields || {}).some(reservedPath))))
+  : Object.values(update?.$rename || {}).some(reservedPath))
+governedRuntimeArtifactSchema.pre('save', async function protectReviewSave() {
+  if (this.isNew && hasTestRenditionProbeIdentity(this.toObject())) assertTestRenditionProbeArtifact(this.toObject())
+  if (this.isNew && hasCompletedArtifactIdentity(this.toObject())) assertCompletedReviewArtifact(this.toObject())
+  if (this.isNew) return
+  let query = this.constructor.exists({ $and: [{ _id: this._id }, protectedReviewFilter] })
+  if (this.$session()) query = query.session(this.$session())
+  if (hasTestRenditionProbeIdentity(this.toObject()) || hasCompletedArtifactIdentity(this.toObject()) || hasRenditionReviewArtifactIdentity(this.toObject()) || await query) throw immutable()
+})
+for (const operation of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace', 'deleteOne', 'deleteMany', 'findOneAndDelete']) {
+  governedRuntimeArtifactSchema.pre(operation, async function protectReviewMutation() {
+    if (unsafe(this.getUpdate?.())) throw immutable()
+    const filter = this.getFilter()
+    if (this.getOptions().upsert && reservedUpdate(filter)) throw immutable()
+    let query = this.model.exists({ $and: [filter, protectedReviewFilter] })
+    if (this.getOptions().session) query = query.session(this.getOptions().session)
+    if (await query) throw immutable()
+    this.setQuery(withoutReview(filter))
+  })
+}
+governedRuntimeArtifactSchema.pre('deleteOne', { document: true, query: false }, async function protectReviewDelete() {
+  let query = this.constructor.exists({ $and: [{ _id: this._id }, protectedReviewFilter] })
+  if (this.$session()) query = query.session(this.$session())
+  if (hasTestRenditionProbeIdentity(this.toObject()) || hasCompletedArtifactIdentity(this.toObject()) || hasRenditionReviewArtifactIdentity(this.toObject()) || await query) throw immutable()
+})
+governedRuntimeArtifactSchema.pre('insertMany', function protectReviewInsert(next, records) {
+  next(records.some(reservedUpdate) ? immutable() : undefined)
+})
+governedRuntimeArtifactSchema.pre('bulkWrite', async function protectReviewBulk(next, operations, options) {
+  try {
+    for (const operation of operations) {
+      const entry = Object.values(operation)[0]
+      if (unsafe(entry?.document) || unsafe(entry?.update) || unsafe(entry?.replacement)) throw immutable()
+      if (entry?.filter) {
+        if (entry.upsert && reservedUpdate(entry.filter)) throw immutable()
+        let query = this.exists({ $and: [entry.filter, protectedReviewFilter] })
+        if (options?.session) query = query.session(options.session)
+        if (await query) throw immutable()
+        entry.filter = withoutReview(entry.filter)
+      }
+    }
+    next()
+  } catch (error) { next(error) }
 })
 
 const GovernedRuntimeArtifact = mongoose.model('GovernedRuntimeArtifact', governedRuntimeArtifactSchema)
