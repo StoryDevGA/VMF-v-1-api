@@ -1,0 +1,19 @@
+# Only the API package and its owned runtime source enter the build context.
+**
+!package.json
+!package-lock.json
+!src/
+!src/**
+
+# Keep these exclusions after the source inclusion rules.
+src/**/__tests__/
+src/**/*.test.js
+src/**/*.spec.js
+src/**/node_modules/
+src/**/.env
+src/**/.env.*
+src/**/*.pem
+src/**/*.key
+src/**/*.pfx
+src/**/*.p12
+src/**/*.log
