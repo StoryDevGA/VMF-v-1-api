@@ -3,6 +3,14 @@
 ## Overview
 This folder contains the production-ready Node/Express API server. It defaults to port 8000 and includes hardened middleware (security headers, CORS, rate limiting, request logging) plus a health endpoint.
 
+## Repository Housekeeping
+
+Application logs go to the console through src/config/logger.js; the start and test commands do not select repository log files. Historical stdout/stderr and sprint test captures were left behind by earlier local runs. Capture new raw output and temporary diagnostics under C:\Dev\StoryLineOS\VMF-Evidence\<workstream>\<dated-run>\, outside this repository.
+
+Keep src/, scripts/, .github/, .git/ and node_modules/ along with the package, environment, Docker, deployment and code-quality configuration. The retained scripts include maintained test and controlled-verification tools; housekeeping does not authorize running them. Canonical project documentation lives in ../docs/.
+
+[6 November 2026 cleanup record and hash manifest](C:/Dev/StoryLineOS/VMF-Evidence/workspace-cleanup/2026-11-06-api-cleanup/README.md). Historical logs, caches, two review reports and the legacy app-local documentation record were archived without deletion.
+
 ## Project Structure
 - `src/server.js` boots the HTTP server and handles graceful shutdown.
 - `src/app.js` configures Express, middleware, and routes.
