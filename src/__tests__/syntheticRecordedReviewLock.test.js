@@ -1,4 +1,4 @@
-import { test, describe, expect, beforeAll, afterAll } from '@jest/globals'
+import { test, describe, expect, beforeAll, afterAll, jest } from '@jest/globals'
 import fs from 'node:fs'
 import mongoose from 'mongoose'
 import env from '../config/env.js'
@@ -8,6 +8,43 @@ import { membershipHash } from '../services/runtimeEvidenceSnapshotContract.js'
 import { SYNTHETIC_REVISION_TEST_POLICY as p } from '../constants/syntheticRevisionTestPolicy.js'
 import Audit from '../models/AuditLog.js'
 import { RECORDED_PUBLISH_GRAPH_WITNESS as g } from '../services/syntheticRecordedReviewLockService.js'
+
+test.each([
+  ['test', 'development', 'test', false, true],
+  ['development', 'development', 'unconnected-cache', false, true],
+  ['production', 'development', 'test', true, true],
+  ['production', 'development', `ss044_${'a'.repeat(32)}`, true, true],
+  ['production', 'development', 'test', false, false],
+  ['production', 'production', 'test', true, false],
+  ['production', 'staging', 'test', true, false],
+  ['unknown', 'development', 'test', true, false],
+  ['production', 'development', 'unknown', true, false],
+])('recorded R3 guard separates historical reads from writers for %s/%s/%s audit=%s', async (nodeEnv, appEnv, database, historical, allowed) => {
+  const previous = { nodeEnv: env.nodeEnv, appEnv: env.appEnv }
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'name')
+  const readRows = jest.fn().mockResolvedValue([])
+  Object.assign(env, { nodeEnv, appEnv })
+  Object.defineProperty(mongoose.connection, 'name', { configurable: true, value: database })
+  try {
+    const args = { runtime: { _id: p.runtimeInstanceId, runtimeInstanceKey: p.runtimeInstanceKey,
+      customerId: p.customerId, tenantId: p.tenantId }, deps: { readRows },
+      ...(historical ? { lockAudit: { diff: { recordedReviewCompletion: {} } } } : {}) }
+    if (!allowed) {
+      await expect(verify(args)).rejects.toMatchObject({ details: { reason: 'DEV_TEST_ONLY' } })
+      expect(readRows).not.toHaveBeenCalled()
+    } else if (historical) {
+      await expect(verify(args)).rejects.toMatchObject({ details: { reason: 'RECORDED_COMPLETION_REQUIRED' } })
+      expect(readRows).toHaveBeenCalledTimes(1)
+    } else {
+      await expect(verify(args)).resolves.toBeNull()
+      expect(readRows).toHaveBeenCalledTimes(1)
+    }
+  } finally {
+    Object.assign(env, previous)
+    if (descriptor) Object.defineProperty(mongoose.connection, 'name', descriptor)
+    else delete mongoose.connection.name
+  }
+})
 
 // Private native readback is an opt-in counterexample, not a seeded approval.
 const dir = process.env.VMF_RECORDED_R3_CACHE
@@ -255,6 +292,34 @@ const refreshedDir = process.env.VMF_RECORDED_R3_REFRESH_CACHE
   graphTest('consumes a signed future lock graph timestamp hop and unchanged historical publish witness', async () => {
     const { args, action, link } = await futureFixture()
     expect(await verify({ ...args, lockAudit: action })).toEqual(link)
+  })
+  graphTest('hosted development consumes the cached historical branch with genuine synthetic lock signatures', async () => {
+    // This is the existing synthetic future-lock fixture over cached history,
+    // not a claim that a new native lock or hosted request has occurred.
+    const { state, args, action, promotion, link } = await futureFixture()
+    for (const row of [action, promotion]) {
+      const signed = Audit.hydrate(row)
+      signed.generateSignature()
+      Object.assign(row, signed.toObject())
+    }
+    args.deps.verifySignature = row => Boolean(row && Audit.hydrate(row).verifySignature())
+    const previous = { nodeEnv: env.nodeEnv, appEnv: env.appEnv }
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'name')
+    Object.assign(env, { nodeEnv: 'production', appEnv: 'development' })
+    Object.defineProperty(mongoose.connection, 'name', { configurable: true, value: 'test' })
+    try {
+      const before = JSON.stringify(state)
+      expect(Audit.hydrate(action).verifySignature()).toBe(true)
+      expect(Audit.hydrate(promotion).verifySignature()).toBe(true)
+      expect(await verify({ ...args, lockAudit: action })).toEqual(link)
+      expect(JSON.stringify(state)).toBe(before)
+      action.signature = 'tampered'
+      await expect(verify({ ...args, lockAudit: action })).rejects.toThrow()
+    } finally {
+      Object.assign(env, previous)
+      if (descriptor) Object.defineProperty(mongoose.connection, 'name', descriptor)
+      else delete mongoose.connection.name
+    }
   })
   graphTest.each(['before', 'after', 'version', 'missingTransition', 'signature', 'scope', 'snapshot', 'graphHash',
     'state', 'missing', 'duplicate', 'graph', 'lockLink'])('rejects future graph %s', async kind => {

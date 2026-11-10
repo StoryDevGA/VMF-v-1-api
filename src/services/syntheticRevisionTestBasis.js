@@ -16,6 +16,7 @@ export const syntheticRevisionFailure = (reason, status = 409) => {
   throw Object.assign(new Error('The R3 test-only prerequisite cannot be verified.'), { code: 'SYNTHETIC_REVISION_TEST_INVALID', status, details: { reason } })
 }
 export const requireSyntheticRevision = (condition, reason) => { if (!condition) syntheticRevisionFailure(reason) }
+export const isSyntheticRevisionTestDatabase = databaseName => /^(test|ss044_[a-f0-9]{32})$/.test(databaseName || '')
 const need = requireSyntheticRevision
 export const syntheticRevisionRows = async (collection, filter, session, cap) => {
   const rows = await mongoose.connection.db.collection(collection).find(filter, { session, maxTimeMS: 3000 })

@@ -8,7 +8,73 @@ import Receipt, { assertSyntheticRevisionReceipt, syntheticRevisionReceiptType }
 import { SYNTHETIC_REVISION_TEST_POLICY as p } from '../constants/syntheticRevisionTestPolicy.js'
 import { membershipHash, membershipJson } from '../services/runtimeEvidenceSnapshotContract.js'
 import { compileSyntheticRevisionBasis } from '../services/syntheticRevisionTestBasis.js'
-import { inspectSyntheticRevisionDisposition, recordSyntheticRevisionDisposition, verifySyntheticRevisionForLock } from '../services/syntheticRevisionTestService.js'
+import { inspectSyntheticRevisionDisposition, recordSyntheticRevisionDisposition, recordSyntheticRevisionCompletion,
+  verifySyntheticRevisionForLock, verifySyntheticRevisionLockLink } from '../services/syntheticRevisionTestService.js'
+
+const withReadEnvironment = async (values, work) => {
+  const previous = { nodeEnv: env.nodeEnv, appEnv: env.appEnv }
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'name')
+  env.nodeEnv = values.nodeEnv; env.appEnv = values.appEnv
+  Object.defineProperty(mongoose.connection, 'name', { configurable: true, value: values.database })
+  try { return await work() }
+  finally {
+    Object.assign(env, previous)
+    if (descriptor) Object.defineProperty(mongoose.connection, 'name', descriptor)
+    else delete mongoose.connection.name
+  }
+}
+const controlledRuntime = () => ({ _id: new mongoose.Types.ObjectId(p.runtimeInstanceId),
+  runtimeInstanceKey: p.runtimeInstanceKey, stateVersion: p.initialStateVersion })
+test.each([
+  ['test', 'development', 'test', 'LOCK_AUDIT_INVALID'],
+  ['development', 'development', 'test', 'LOCK_AUDIT_INVALID'],
+  ['production', 'development', 'test', 'LOCK_AUDIT_INVALID'],
+  ['production', 'development', `ss044_${'a'.repeat(32)}`, 'LOCK_AUDIT_INVALID'],
+  ['production', 'production', 'test', 'DEV_TEST_ONLY'],
+  ['production', 'staging', 'test', 'DEV_TEST_ONLY'],
+  ['unknown', 'development', 'test', 'DEV_TEST_ONLY'],
+  ['production', 'development', 'unknown', 'DEV_TEST_ONLY'],
+])('historical R3 reader keeps audit and environment checks for %s/%s/%s', async (nodeEnv, appEnv, database, reason) => {
+  await withReadEnvironment({ nodeEnv, appEnv, database }, async () => {
+    await expect(verifySyntheticRevisionLockLink({ runtime: controlledRuntime(), audit: {} }))
+      .rejects.toMatchObject({ details: { reason } })
+  })
+})
+test('hosted development historical read requires a genuine signed audit before any source read', async () => {
+  await withReadEnvironment({ nodeEnv: 'production', appEnv: 'development', database: 'test' }, async () => {
+    const audit = new Audit({ actorUserId: p.recorderUserId, action: 'RUNTIME_ACTION_EXECUTED', resourceType: 'RuntimeInstance',
+      resourceId: p.runtimeInstanceId, scope: { customerId: p.customerId, tenantId: p.tenantId, runtimeInstanceId: p.runtimeInstanceId },
+      diff: { actionKey: 'LOCK_RECORD' } })
+    audit.generateSignature()
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'db'), findOne = jest.fn().mockResolvedValue(null)
+    Object.defineProperty(mongoose.connection, 'db', { configurable: true, value: { collection: () => ({ findOne }) } })
+    try {
+      await expect(verifySyntheticRevisionLockLink({ runtime: controlledRuntime(), audit: audit.toObject() }))
+        .rejects.toMatchObject({ details: { reason: 'CURRENT_LOCKED_SOURCE_REQUIRED' } })
+      expect(findOne).toHaveBeenCalledTimes(1)
+      const changed = audit.toObject(); changed.diff.rationale = 'Changed after signing.'
+      await expect(verifySyntheticRevisionLockLink({ runtime: controlledRuntime(), audit: changed }))
+        .rejects.toMatchObject({ details: { reason: 'LOCK_AUDIT_INVALID' } })
+      expect(findOne).toHaveBeenCalledTimes(1)
+    } finally {
+      if (descriptor) Object.defineProperty(mongoose.connection, 'db', descriptor)
+      else delete mongoose.connection.db
+    }
+  })
+})
+test('hosted development does not open synthetic writers or prospective lock verification', async () => {
+  await withReadEnvironment({ nodeEnv: 'production', appEnv: 'development', database: 'test' }, async () => {
+    const session = jest.spyOn(mongoose, 'startSession')
+    try {
+      for (const work of [inspectSyntheticRevisionDisposition, recordSyntheticRevisionDisposition, recordSyntheticRevisionCompletion]) {
+        await expect(work({})).rejects.toMatchObject({ details: { reason: 'DEV_TEST_ONLY' } })
+      }
+      await expect(verifySyntheticRevisionForLock(controlledRuntime(), null))
+        .rejects.toMatchObject({ details: { reason: 'DEV_TEST_ONLY' } })
+      expect(session).not.toHaveBeenCalled()
+    } finally { session.mockRestore() }
+  })
+})
 
 test('exact new case binding preserves the original adopted amendment bytes', () => {
   const dir = '../../../docs/generated/harness-runs/ss-044/'

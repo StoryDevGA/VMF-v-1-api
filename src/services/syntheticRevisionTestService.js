@@ -9,13 +9,15 @@ import { syntheticTestDispositionBodySchema } from '../validators/syntheticTestD
 import { reviewCompletionBodySchema } from '../validators/reviewCompletion.validator.js'
 import { getRuntimeInstance, assertRuntimePermission } from './runtimeInstanceService.js'
 import { membershipHash, membershipJson } from './runtimeEvidenceSnapshotContract.js'
-import { compileSyntheticRevisionBasis, syntheticRevisionFailure as fail, requireSyntheticRevision as need } from './syntheticRevisionTestBasis.js'
+import { compileSyntheticRevisionBasis, syntheticRevisionFailure as fail, requireSyntheticRevision as need,
+  isSyntheticRevisionTestDatabase } from './syntheticRevisionTestBasis.js'
 import auditService from './auditService.js'
 import { isRuntimeLifecycleTruthImmutable } from './runtimeActionPolicyService.js'
 
 const options = session => ({ session, maxTimeMS: 3000 })
-const environment = () => need(['development', 'test'].includes(env.nodeEnv) && env.appEnv === 'development'
-  && /^(test|ss044_[a-f0-9]{32})$/.test(mongoose.connection.name || ''), 'DEV_TEST_ONLY')
+const environment = ({ historicalRead = false } = {}) => need((['development', 'test'].includes(env.nodeEnv)
+  || historicalRead && env.nodeEnv === 'production') && env.appEnv === 'development'
+  && isSyntheticRevisionTestDatabase(mongoose.connection.name), 'DEV_TEST_ONLY')
 const recorder = args => {
   environment()
   if (String(args.actorUserId) !== p.recorderUserId || !args.scopes?.platformRoles?.includes('SUPER_ADMIN'))
@@ -189,7 +191,9 @@ export const verifySyntheticRevisionForLock = async (runtime, session) => {
 }
 export const verifySyntheticRevisionLockLink = async ({ runtime, audit, session }) => {
   if (!isSyntheticRevisionTestRuntime(runtime)) return
-  environment()
+  // Hosted development uses production Node. This only reads a signed,
+  // already-locked link; recorder and prospective lock gates stay unchanged.
+  environment({ historicalRead: true })
   need(audit && Audit.hydrate(audit).verifySignature() && audit.action === 'RUNTIME_ACTION_EXECUTED'
     && audit.diff?.actionKey === 'LOCK_RECORD' && String(audit.resourceId) === p.runtimeInstanceId
     && ['customerId', 'tenantId', 'runtimeInstanceId'].every(key => String(audit.scope?.[key]) === p[key]), 'LOCK_AUDIT_INVALID')

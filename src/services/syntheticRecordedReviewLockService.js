@@ -6,7 +6,8 @@ import { SYNTHETIC_REVISION_TEST_POLICY as p } from '../constants/syntheticRevis
 import { membershipHash, membershipJson } from './runtimeEvidenceSnapshotContract.js'
 import { compileReviewPopulation } from './reviewCompletionService.js'
 import { getDiscoveryContradictionReview } from './discoveryContradictionReviewService.js'
-import { compileQualifiedRevisionMaterial, syntheticRevisionRows, requireSyntheticRevision as need } from './syntheticRevisionTestBasis.js'
+import { compileQualifiedRevisionMaterial, syntheticRevisionRows, requireSyntheticRevision as need,
+  isSyntheticRevisionTestDatabase } from './syntheticRevisionTestBasis.js'
 
 // Observed technical witness for the already authorised, recorded R3 case.
 // This does not amend the original test-only policy or confer semantic authority.
@@ -152,7 +153,10 @@ const verifySourceRefresh = async ({ runtime, basis, read, signed, session }) =>
 }
 
 export const verifyRecordedSyntheticReviewForLock = async ({ runtime, session, lockAudit = null, deps = {} }) => {
-  need(['development', 'test'].includes(env.nodeEnv) && env.appEnv === 'development', 'DEV_TEST_ONLY')
+  const hostedHistoricalRead = env.nodeEnv === 'production' && Boolean(lockAudit)
+    && isSyntheticRevisionTestDatabase(mongoose.connection.name)
+  need((['development', 'test'].includes(env.nodeEnv) || hostedHistoricalRead)
+    && env.appEnv === 'development', 'DEV_TEST_ONLY')
   const read = deps.readRows || syntheticRevisionRows, one = deps.readOne || defaultReadOne
   const signed = deps.verifySignature || (a => Boolean(a && Audit.hydrate(a).verifySignature()))
   const nativeScope = scope()
