@@ -2,6 +2,7 @@ import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
 import { readContradictionReviewBasis, reconcileContradictionReviewBasis } from './contradictionReviewBasis.js'
 import { acceptanceContradictionReviewEpoch, acquisitionContradictionReviewEpoch, preserveDiscoveryEvidenceDecisions } from './discoveryEvidenceContinuityService.js'
 import { assertRetainedWebsiteMaterial, reconcileWebsiteMaterial } from './discoveryWebsiteMaterialService.js'
+import { assertPostLockOriginPairs, postLockAdmissionError } from './postLockSuccessorAdmissionContract.js'
 import { assertResolvedControlledReplay, buildResolvedControlledReplay } from './controlledReplayAcquisitionService.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
   recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
@@ -1309,8 +1310,26 @@ export const buildDiscoveryEvidencePack = async ({
       revisions: [...(previousEvidencePack.revisions || []), { revisionId: `controlled-${acquisitionExecution.runId}`, createdAt: refreshedAt,
         createdBy: toIdString(actorUserId), reason, evidenceHash: hashDiscoveryValue({ sourceRegistry, evidenceObjects }), acquisitionProfile: profile }] }
   }
+  // Admitted material belongs to the successor basis, independently of how new
+  // evidence is acquired. Validate all peers before separating acquisition rows.
+  const hasOrigin = row => row && Object.hasOwn(row, 'postLockOrigin')
+  const previousSources = previousEvidencePack.lineage?.sources || []
+  const previousRegistry = previousEvidencePack.sourceRegistry || []
+  const previousEvidence = previousEvidencePack.evidenceObjects || []
+  assertPostLockOriginPairs({ sources: previousRegistry, evidenceObjects: previousEvidence })
+  assertPostLockOriginPairs({ sources: previousSources, evidenceObjects: previousEvidence })
+  const admittedSources = previousSources.filter(hasOrigin)
+  const admittedRegistry = previousRegistry.filter(hasOrigin)
+  const admittedEvidence = previousEvidence.filter(hasOrigin)
+  if (admittedEvidence.some(item => previousEvidence.filter(row => row.evidenceObjectId === item.evidenceObjectId).length !== 1)) {
+    throw postLockAdmissionError('POST_LOCK_ADMISSION_MATERIAL_INVALID')
+  }
+  const acquisitionPreviousPack = { ...previousEvidencePack,
+    lineage: { ...previousEvidencePack.lineage, sources: previousSources.filter(row => !hasOrigin(row)) },
+    sourceRegistry: previousRegistry.filter(row => !hasOrigin(row)),
+    evidenceObjects: previousEvidence.filter(row => !hasOrigin(row)) }
   const contradictionReviewEpoch = acquisitionContradictionReviewEpoch(previousEvidencePack.contradictionReviewEpoch)
-  const { normalizedInputs, profile, websiteSources, missingInputKeys, inputComplete } = planDiscoveryAcquisition({ inputs, acquisitionProfile, previousEvidencePack })
+  const { normalizedInputs, profile, websiteSources, missingInputKeys, inputComplete } = planDiscoveryAcquisition({ inputs, acquisitionProfile, previousEvidencePack: acquisitionPreviousPack })
   const profileConfig = DISCOVERY_ACQUISITION_PROFILE_CONFIG[profile]
   const inputEvidenceKeys = DISCOVERY_INPUT_KEYS.filter((key) => Boolean(normalizedInputs[key]))
   const inputKeys = [
@@ -1406,7 +1425,7 @@ export const buildDiscoveryEvidencePack = async ({
   }
   let websiteMaterial
   try {
-    websiteMaterial = reconcileWebsiteMaterial({ previousEvidencePack, fresh: submittedWebsiteAcquisition })
+    websiteMaterial = reconcileWebsiteMaterial({ previousEvidencePack: acquisitionPreviousPack, fresh: submittedWebsiteAcquisition })
   } catch (error) {
     if (error.details?.reason !== 'ACQUISITION_CONTINUITY_BLOCKED') throw error
     throw buildMutationError({ status: 409, code: 'CONFLICT', message: error.message,
@@ -1443,18 +1462,18 @@ export const buildDiscoveryEvidencePack = async ({
     !submittedWebsiteAcquisition.sources.some(source => source.status === 'ACQUIRED' && source.sourceId === item.sourceId)),
   ...submittedWebsiteAcquisition.evidenceObjects]
   documentAcquisition.evidenceObjects = reconciledEvidence.filter(item => item.acquisitionMethod === 'DOCUMENT_INGESTION')
-  const previousDocumentSources = Array.isArray(previousEvidencePack?.lineage?.sources)
-    ? previousEvidencePack.lineage.sources.filter((source) =>
+  const previousDocumentSources = Array.isArray(acquisitionPreviousPack.lineage?.sources)
+    ? acquisitionPreviousPack.lineage.sources.filter((source) =>
         source?.type === 'UPLOADED_DOCUMENT' || source?.sourceType === 'UPLOADED_DOCUMENT',
       )
     : []
-  const previousDocumentEvidenceObjects = Array.isArray(previousEvidencePack?.evidenceObjects)
-    ? previousEvidencePack.evidenceObjects.filter((evidenceObject) =>
+  const previousDocumentEvidenceObjects = Array.isArray(acquisitionPreviousPack.evidenceObjects)
+    ? acquisitionPreviousPack.evidenceObjects.filter((evidenceObject) =>
         evidenceObject?.acquisitionMethod === 'DOCUMENT_INGESTION',
       )
     : []
-  const previousDocumentRegistry = Array.isArray(previousEvidencePack?.sourceRegistry)
-    ? previousEvidencePack.sourceRegistry.filter((source) => source?.sourceType === 'UPLOADED_DOCUMENT')
+  const previousDocumentRegistry = Array.isArray(acquisitionPreviousPack.sourceRegistry)
+    ? acquisitionPreviousPack.sourceRegistry.filter((source) => source?.sourceType === 'UPLOADED_DOCUMENT')
     : []
   const documentSourcesForPack = mergeDiscoveryEntriesByKey(
     'sourceId',
@@ -1475,22 +1494,27 @@ export const buildDiscoveryEvidencePack = async ({
     ...inputSources,
     ...websiteMaterial.sources,
     ...documentSourcesForPack,
+    ...admittedSources,
   ]
   const inputSourceRegistry = buildDiscoverySourceRegistry({
     capturedAt: refreshedAt,
     evidenceObjects: inputEvidenceObjects,
     sources: inputSources,
   })
+  const registryForPack = [...inputSourceRegistry, ...websiteMaterial.sourceRegistry, ...documentRegistryForPack, ...admittedRegistry]
+  const evidenceForPack = [...inputEvidenceObjects, ...websiteMaterial.evidenceObjects, ...documentEvidenceObjectsForPack, ...admittedEvidence]
+  for (const [rows, key, retained] of [[sources, 'sourceId', admittedSources],
+    [registryForPack, 'sourceId', admittedRegistry], [evidenceForPack, 'evidenceObjectId', admittedEvidence]]) {
+    if (retained.some(item => rows.filter(row => row[key] === item[key]).length !== 1)) {
+      throw postLockAdmissionError('POST_LOCK_ADMISSION_MATERIAL_INVALID')
+    }
+  }
   const evidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: profile,
     createdAt: refreshedAt,
-    evidenceObjects: [
-      ...inputEvidenceObjects,
-      ...websiteMaterial.evidenceObjects,
-      ...documentEvidenceObjectsForPack,
-    ],
+    evidenceObjects: evidenceForPack,
     inputs: normalizedInputs,
-    sourceRegistry: [...inputSourceRegistry, ...websiteMaterial.sourceRegistry, ...documentRegistryForPack],
+    sourceRegistry: registryForPack,
     sources,
   })
   try {
@@ -1500,11 +1524,7 @@ export const buildDiscoveryEvidencePack = async ({
     throw buildMutationError({ status: 409, code: 'CONFLICT', message: error.message,
       reason: 'ACQUISITION_CONTINUITY_BLOCKED', details: failureDetails })
   }
-  const sourceRegistry = preserveSourceRecordedReviews([
-    ...inputSourceRegistry,
-    ...websiteMaterial.sourceRegistry,
-    ...documentRegistryForPack,
-  ], previousEvidencePack.sourceRegistry).map(source => {
+  const sourceRegistry = preserveSourceRecordedReviews(registryForPack, previousEvidencePack.sourceRegistry).map(source => {
     const summary = buildDiscoveryEvidenceReviewSummary(evidenceObjects.filter(item => item.sourceId === source.sourceId))
     return { ...source, acceptedEvidenceObjects: summary.acceptedEvidenceCount,
       rejectedEvidenceObjects: summary.rejectedEvidenceCount, pendingEvidenceObjects: summary.pendingReviewCount }

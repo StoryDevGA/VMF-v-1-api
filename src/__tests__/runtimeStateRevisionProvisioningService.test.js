@@ -1,8 +1,10 @@
 import { describe, expect, jest, test } from '@jest/globals'
 import mongoose from 'mongoose'
+import RuntimeInstance from '../models/RuntimeInstance.js'
 import RuntimeStateSection from '../models/RuntimeStateSection.js'
 import { createRuntimeStateLegacyRowSet } from '../services/runtimeStateLegacyMapper.js'
 import { createSectionHistoryReadContext, getSectionHistoryRowKey, hashSectionHistoryPair } from '../services/runtimeSectionHistoryContract.js'
+import { normalizeRuntimeSectionObject } from '../services/runtimeSectionModelService.js'
 
 import {
   RUNTIME_STATE_V2_REVISION_PROVISIONING_ERROR_CODE,
@@ -20,7 +22,7 @@ const makeModel = (rows = []) => ({
 })
 
 const clone = value => JSON.parse(JSON.stringify(value))
-const historyFixture = ({ count = 7, inlineIndices = [] } = {}) => {
+const historyFixture = ({ count = 7, inlineIndices = [], normalizedCurrentSection = false } = {}) => {
   const now = new Date('2026-10-20T07:00:00.000Z')
   const source = { ...sourceRuntimeInstance, stateVersion: 'rsv2:22222222-2222-4222-8222-222222222222',
     framework_state: { sections: {}, evidence_pack: { sourceRegistry: [], evidenceObjects: [] },
@@ -39,6 +41,10 @@ const historyFixture = ({ count = 7, inlineIndices = [] } = {}) => {
     return { ...createRuntimeStateLegacyRowSet(input(runtime)).rows.sections[0], _id: new mongoose.Types.ObjectId(), current: false }
   })
   source.framework_state.sections.customer_context = { generated: archives.at(-1).generated, accepted: archives.at(-1).accepted, revisions: archives }
+  if (normalizedCurrentSection) source.framework_state.sections.customer_context = normalizeRuntimeSectionObject({
+    value: source.framework_state.sections.customer_context, sectionKey: 'customer_context',
+    runtimePath: 'framework_state.sections.customer_context', initializedAt: now.toISOString(),
+  })
   const sourceRow = { ...createRuntimeStateLegacyRowSet(input(source), { sectionDetailProjector: detail => ({ ...detail,
     revisions: detail.revisions.map((record, index) => inlineIndices.includes(index) ? record : ({ ...record, generated: null, accepted: null,
       historyReference: { version: 'runtime-section-history.v1', stateVersion: targets[index].stateVersion,
@@ -249,5 +255,67 @@ describe('Runtime State V2 revision provisioning', () => {
 
     expect(dependencies.RuntimeStateSection.insertMany).not.toHaveBeenCalled()
     expect(dependencies.RuntimeEvidenceObject.insertMany).not.toHaveBeenCalled()
+  })
+})
+
+const actualRevisionDocument = value => new RuntimeInstance({ ...value,
+  name: 'Owned synthetic revision representation', runtimeType: 'VALUE_NARRATIVE', frameworkKey: 'SS056_SYNTHETIC',
+  packageId: '507f1f77bcf86cd799439016', packageKey: 'synthetic-representation', packageVersion: '1.0',
+  dependencyLockId: 'synthetic-dependency', activationId: 'synthetic-activation', deploymentId: 'synthetic-deployment',
+  evidence: { activationId: 'synthetic-activation', deploymentId: 'synthetic-deployment',
+    dependencySnapshotId: 'synthetic-dependency', dependencySnapshotHash: 'a'.repeat(64) },
+  status: 'ACTIVE', executionStatus: 'IDLE', createdBy: '507f1f77bcf86cd799439017',
+  revision: { revisionNumber: 2, parentRuntimeId: sourceRuntimeInstance._id,
+    parentRuntimeInstanceKey: sourceRuntimeInstance.runtimeInstanceKey, rootRuntimeId: sourceRuntimeInstance._id,
+    rootRuntimeInstanceKey: sourceRuntimeInstance.runtimeInstanceKey, createdFromRevision: 1 },
+})
+
+describe('actual Mongoose revision representation through the native provisioner', () => {
+  test('preserves empty section domains when provisioning an actual model through the real mapper', async () => {
+    const frame = { sections: {}, evidence_pack: { sourceRegistry: [], evidenceObjects: [] },
+      intelligence_graph: { graphVersion: 'model-representation-v1', nodes: [], edges: [] } }
+    const revision = actualRevisionDocument({ ...revisionRuntimeInstance, framework_state: clone(frame) })
+    expect(revision.validateSync()).toBeUndefined()
+    const dependencies = makeDependencies()
+    dependencies.createRuntimeStateLegacyRowSet = jest.fn(createRuntimeStateLegacyRowSet)
+    const before = JSON.stringify(revision.toObject({ depopulate: true, virtuals: false, minimize: false }))
+    const result = await stageRuntimeStateRevisionProvisioning({ sourceRuntimeInstance,
+      revisionRuntimeInstance: revision, session: { inTransaction: () => true }, dependencies,
+      now: new Date('2026-11-06T12:00:00.000Z') })
+    const input = dependencies.createRuntimeStateLegacyRowSet.mock.calls[0][0]
+    expect(Object.hasOwn(input.legacyInput, 'sections')).toBe(true)
+    expect(input.legacyInput.sections).toEqual(frame.sections)
+    expect(input.legacyInput.evidencePack).toEqual(frame.evidence_pack)
+    const fullSource = createRuntimeStateLegacyRowSet({ ...input, legacyInput: { ...input.legacyInput,
+      sections: frame.sections, evidencePack: frame.evidence_pack, intelligenceGraph: frame.intelligence_graph } })
+    expect(result.sourceSetHash).toBe(fullSource.sourceSetHash)
+    expect(result.counts).toMatchObject({ sectionCount: 0, sourceCount: 0, evidenceObjectCount: 0, graphSnapshotCount: 1 })
+    expect(dependencies.RuntimeGraphSnapshot.insertMany).toHaveBeenCalledWith(
+      [expect.objectContaining({ stateStatus: 'STALE' })], { ordered: true, session: expect.any(Object) })
+    expect(JSON.stringify(revision.toObject({ depopulate: true, virtuals: false, minimize: false }))).toBe(before)
+  })
+  test('preserves normalized historical section hashes and verified child history for an actual model', async () => {
+    const f = historyFixture({ normalizedCurrentSection: true })
+    const revision = actualRevisionDocument(f.revision)
+    expect(revision.validateSync()).toBeUndefined()
+    const before = JSON.stringify({ source: f.source, row: f.sourceRow, targets: f.targets,
+      child: revision.toObject({ depopulate: true, virtuals: false, minimize: false }) })
+    await stageRuntimeStateRevisionProvisioning({ ...f.args, revisionRuntimeInstance: revision })
+    const input = f.dependencies.createRuntimeStateLegacyRowSet.mock.calls[0][0]
+    expect(input.legacyInput.sections).toEqual(f.source.framework_state.sections)
+    expect(input.legacyInput.sections.customer_context).toMatchObject({ review: {}, dependencies: {}, validation: {},
+      confidence: {}, intelligence: {}, metrics: {}, additionalEvidence: {}, gsilContext: {} })
+    const calls = f.dependencies.RuntimeStateSection.insertMany.mock.calls
+    expect(calls).toHaveLength(2)
+    const historical = calls[0][0], current = calls[1][0]
+    expect(current).toHaveLength(1)
+    expect(current[0].sourceHash).toBe(f.sourceRow.sourceHash)
+    expect(historical).toHaveLength(7)
+    for (const row of [...historical, ...current]) expect(new RuntimeStateSection(row).validateSync()).toBeUndefined()
+    const restored = await createSectionHistoryReadContext({ readRows: async filter => historical.filter(row =>
+      Object.entries(filter).every(([key, value]) => String(row[key]) === String(value))) }).verify(current)
+    expect([...restored.get(getSectionHistoryRowKey(current[0])).values()]).toEqual(f.source.framework_state.sections.customer_context.revisions)
+    expect(JSON.stringify({ source: f.source, row: f.sourceRow, targets: f.targets,
+      child: revision.toObject({ depopulate: true, virtuals: false, minimize: false }) })).toBe(before)
   })
 })

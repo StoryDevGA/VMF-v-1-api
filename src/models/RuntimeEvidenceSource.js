@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { validPostLockRow } from '../services/postLockEvidenceIntakeContract.js'
+import { projectPostLockOrigin } from '../services/postLockSuccessorAdmissionContract.js'
 import { sourceVerificationContextSchema } from '../services/sourceVerificationContext.js'
 import { validateSourceCapture } from '../services/sourceEvidenceContract.js'
 import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance,
@@ -29,7 +31,17 @@ const sourceCaptureSchema = new mongoose.Schema({
 
 const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_sources',
+  validatePostLockAssociation: row => validPostLockRow(row, 'source'),
   fields: {
+    postLockOrigin: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true, validate: {
+      validator: function (value) {
+        if (value === undefined) return true
+        try { projectPostLockOrigin(this.toObject({ depopulate: true }), 'source'); return true } catch { return false }
+      }, message: 'Invalid historical post-lock source origin.',
+    } },
+    postLockAssociation: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true,
+      validate: { validator: function (value) { return value === undefined || validPostLockRow(this, 'source') },
+        message: 'Invalid pending post-lock source association.' } },
     controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined,
       set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(
         value instanceof mongoose.Document ? value.toObject() : value), validate: {

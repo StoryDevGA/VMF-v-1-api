@@ -1,0 +1,52 @@
+# Local development only. From this directory:
+#   docker compose -f compose.local.yaml up -d --wait
+# Requires the existing dependency image, matching package.json/package-lock.json,
+# local .env and cache network. No image build, pull, seeds or migrations.
+# Source edits are mounted directly; restart this service to load API edits:
+#   docker compose -f compose.local.yaml restart api
+# Stop any older local API holding port 8000 before starting this service.
+name: vmf-local
+services:
+  api:
+    image: "sha256:5eb3896e82f3452dda30c54be182b6b4f73d9b9f93edf31480ef5fb460f2a19f"
+    pull_policy: never
+    container_name: vmf-api-local-current
+    restart: "no"
+    working_dir: /app
+    command: ["node", "src/server.js"]
+    env_file:
+      - path: .env
+        format: raw
+    environment:
+      NODE_ENV: development
+      APP_ENV: development
+      PORT: "8000"
+      DEVELOPMENT_STARTUP_TASKS_ENABLED: "false"
+      OUTCOME_STUDIO_PROVIDER_ENABLED: "false"
+      VMF_SECTION_REASONING_PROVIDER_ENABLED: "false"
+      FAKE_AUTH_ENABLED: "false"
+      CONTROLLED_DOCX_READ_ENABLED: "false"
+      CONTROLLED_DOCX_READ_CORRECTION_ENABLED: "false"
+      CONTROLLED_DOCX_READ_APPROVED_ENABLED: "false"
+      CONTROLLED_DOCX_READ_NARROW_ENABLED: "false"
+      REDIS_REQUIRED: "true"
+      REDIS_URL: "redis://ss053-local-login-valkey-20261105:6379"
+      CORS_ORIGIN: "http://localhost:5173"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - type: bind
+        source: ./src
+        target: /app/src
+        read_only: true
+    networks:
+      - existing-local
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+networks:
+  existing-local:
+    external: true
+    name: ss053-browser-login-20261105

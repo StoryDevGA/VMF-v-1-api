@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { projectPostLockOrigin, assertPostLockOriginPairs } from './postLockSuccessorAdmissionContract.js'
 import { readContradictionReviewBasis } from './contradictionReviewBasis.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import AuditLog from '../models/AuditLog.js'
@@ -196,6 +197,15 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
   updatedAt: 1,
 })
 
+// Public evidence reads retain incompatible origin metadata only for validation.
+const RUNTIME_STATE_V2_PUBLIC_EVIDENCE_PROJECTION = Object.freeze({
+  ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  postLockOrigin: 1,
+  postLockAssociation: 1,
+  postLockImpactHistory: 1,
+  postLockAdmission: 1,
+})
+
 const RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
   legacyPath: 1,
@@ -225,6 +235,10 @@ const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
 })
 
 const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
+  postLockOrigin: 1,
+  postLockAssociation: 1,
+  postLockImpactHistory: 1,
+  postLockAdmission: 1,
   _id: 1,
   runtimeInstanceId: 1,
   runtimeInstanceKey: 1,
@@ -1142,7 +1156,17 @@ const assertCurrentEvidenceSourceRows = (rows) => {
   })
 }
 
+// This validates stored historical material only, not audit signatures or authority.
+const validatePublicPostLockOrigin = (validate) => {
+  try { return validate() }
+  catch {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+      status: 503, message: 'The recorded historical post-lock origin is invalid.' })
+  }
+}
+
 const serializeEvidenceObject = (row, stateVersion) => {
+  const origin = validatePublicPostLockOrigin(() => projectPostLockOrigin(row, 'evidence'))
   const draftQualification = assertEvidenceDraftQualification({ evidence: row })
   if (!isValidEvidenceSourceLocation(row.sourceLocation)) throw createRuntimeStateError({
     code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
@@ -1150,12 +1174,13 @@ const serializeEvidenceObject = (row, stateVersion) => {
   return {
   evidenceObjectId: normalizeText(row.evidenceObjectId || row._id),
   ...projectControlledReplayProvenance(row, row),
+  ...origin,
   sourceId: normalizeText(row.sourceId),
   lineageRef: truncateSummary(row.lineageRef, 1000),
   stateVersion,
   sourceStateVersion: normalizeText(row.sourceStateVersion),
   sourceType: normalizeText(row.sourceType),
-  extractedFact: truncateSummary(row.extractedFact, 8000),
+  extractedFact: origin.postLockOrigin ? row.extractedFact : truncateSummary(row.extractedFact, 8000),
   ...(draftQualification ? { draftQualification } : {}),
   ...(row.sourceLocation !== undefined ? { sourceLocation: row.sourceLocation } : {}),
   evidenceSupport: row.evidenceSupport !== undefined ? validateEvidenceSupport(row.evidenceSupport,
@@ -1169,7 +1194,7 @@ const serializeEvidenceObject = (row, stateVersion) => {
     : null,
   materiality: normalizeText(row.materiality),
   materialityScore: Number.isFinite(Number(row.materialityScore)) ? Number(row.materialityScore) : null,
-  title: truncateSummary(row.title, 300),
+  title: origin.postLockOrigin ? row.title : truncateSummary(row.title, 300),
   summary: truncateSummary(row.summary),
   contentHash: normalizeText(row.contentHash),
   createdAt: row.createdAt || null,
@@ -1178,6 +1203,7 @@ const serializeEvidenceObject = (row, stateVersion) => {
 }
 
 const serializeEvidenceSource = (row, stateVersion) => {
+  const origin = validatePublicPostLockOrigin(() => projectPostLockOrigin(row, 'source'))
   if (row.verificationContext !== undefined && !sourceVerificationContextSchema.safeParse(row.verificationContext).success)
     throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
       status: 503, message: 'The recorded source review is invalid.' })
@@ -1197,6 +1223,7 @@ const serializeEvidenceSource = (row, stateVersion) => {
     sourceId: normalizeText(row.sourceId),
     materialFingerprint: sourceMaterialFingerprint(row),
     ...projectControlledReplayProvenance(row, row),
+    ...origin,
     sourceType,
     type: sourceType,
     label: truncateSummary(row.title, 1000),
@@ -1703,6 +1730,7 @@ export const listRuntimeStateEvidenceObjects = async ({
   const [rows, totalReceipt] = await Promise.all([
     readMany({
       collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
+      projection: RUNTIME_STATE_V2_PUBLIC_EVIDENCE_PROJECTION,
       filter,
       sort: { createdAt: -1, _id: 1 },
       skip: (normalizedPage - 1) * normalizedPageSize,
@@ -1791,6 +1819,7 @@ export const listRuntimeStateEvidenceObjects = async ({
   }
   assertSourceEvidenceMetadataPairs({ sources: sourceRows, evidenceObjects: rows })
   assertControlledReplayProvenancePairs({ sources: sourceRows, evidenceObjects: rows })
+  validatePublicPostLockOrigin(() => assertPostLockOriginPairs({ sources: sourceRows, evidenceObjects: rows }))
   rows.forEach(row => assertEvidenceDraftQualification({ evidence: row, source: sourceRows.find(source => source.sourceId === row.sourceId) }))
   const sourceRegistry = sourceRows.map((row) => serializeEvidenceSource(row, stateVersion))
   const pageReceipt = rows.length === 0

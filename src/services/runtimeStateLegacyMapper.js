@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { projectPostLockOrigin, assertPostLockOriginPairs } from './postLockSuccessorAdmissionContract.js'
 import { validateSourceCapture, validateEvidenceSupport } from './sourceEvidenceContract.js'
 import { assertEvidenceDraftQualification, preserveEvidenceDraftQualification } from './evidenceDraftQualification.js'
 
@@ -272,6 +273,7 @@ const mapSources = ({ manifest, common }) => {
       sourceType,
       title,
       ...projectControlledReplayProvenance(value, common),
+      ...projectPostLockOrigin(value, 'source'),
       sourceRef,
       contentHash,
       ...(hasOwn(value, 'sourceCapture') ? { sourceCapture: validateSourceCapture(value.sourceCapture,
@@ -365,6 +367,7 @@ const mapEvidence = ({ manifest, common, sourceIds, sources }) => {
       sourceId,
       sourceType,
       ...projectControlledReplayProvenance(value, common),
+      ...projectPostLockOrigin(value, 'evidence'),
       lineageRef,
       extractedFact,
       ...(hasOwn(value, 'sourceLocation') ? { sourceLocation: value.sourceLocation } : {}),
@@ -634,6 +637,7 @@ const createSourceRows = ({ authority, serializerResult, mappingManifest }, { se
     sourceIds,
     sources: new Map(evidenceSources.map(row => [row.sourceId, row])),
   })
+  assertPostLockOriginPairs({ sources: evidenceSources, evidenceObjects })
   return { evidenceObjects, evidenceSources, sections }
 }
 

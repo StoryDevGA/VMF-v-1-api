@@ -1,4 +1,9 @@
 import express, { Router } from 'express'
+import { submitRuntimePostLockEvidence, getRuntimePostLockEvidence, getRuntimePostLockEvidenceList,
+  getRuntimePostLockOperationalCapability } from '../controllers/runtimeInstance.controller.js'
+import { validatePostLockEvidenceSubmission, validatePostLockSubmissionParams, validatePostLockEvidenceListQuery } from '../validators/runtimeInstance.validator.js'
+import { recordRuntimePostLockImpact, getRuntimePostLockImpactHistory } from '../controllers/runtimeInstance.controller.js'
+import { validatePostLockImpactDecision, validatePostLockImpactHistoryQuery } from '../validators/runtimeInstance.validator.js'
 import { readSyntheticTestDisposition, saveSyntheticTestDisposition, readSyntheticTestCompletion,
   saveSyntheticTestCompletion } from '../controllers/syntheticTestDisposition.controller.js'
 import { validateSyntheticTestDispositionBody } from '../validators/syntheticTestDisposition.validator.js'
@@ -210,6 +215,18 @@ router.get('/:runtimeInstanceId/state/source-summary', validateRuntimeInstanceId
 router.get('/:runtimeInstanceId/state/evidence-inventory', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateEvidenceInventory)
 router.get('/:runtimeInstanceId/state/discovery-health', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateDiscoveryHealth)
 router.get('/:runtimeInstanceId/state/lock-basis', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateLockBasis)
+router.get('/:runtimeInstanceId/post-lock-evidence-capability', validateRuntimeInstanceId,
+  validateReviewCompletionScope, getRuntimePostLockOperationalCapability)
+router.post('/:runtimeInstanceId/post-lock-evidence', validateRuntimeInstanceId, validateReviewCompletionScope,
+  validatePostLockEvidenceSubmission, submitRuntimePostLockEvidence)
+router.get('/:runtimeInstanceId/post-lock-evidence', validateRuntimeInstanceId,
+  validatePostLockEvidenceListQuery, getRuntimePostLockEvidenceList)
+router.get('/:runtimeInstanceId/post-lock-evidence/:submissionId', validateRuntimeInstanceId, validateReviewCompletionScope,
+  validatePostLockSubmissionParams, getRuntimePostLockEvidence)
+router.post('/:runtimeInstanceId/post-lock-evidence/:submissionId/impact-decisions', validateRuntimeInstanceId,
+  validateReviewCompletionScope, validatePostLockSubmissionParams, validatePostLockImpactDecision, recordRuntimePostLockImpact)
+router.get('/:runtimeInstanceId/post-lock-evidence/:submissionId/impact-decisions', validateRuntimeInstanceId,
+  validatePostLockSubmissionParams, validatePostLockImpactHistoryQuery, getRuntimePostLockImpactHistory)
 router.get('/:runtimeInstanceId/state/contradiction-history', validateRuntimeInstanceId, validateContradictionHistoryQuery, getRuntimeStateContradictionHistory)
 router.get('/:runtimeInstanceId/state/findings', validateRuntimeInstanceId, validateIntelligenceFindingQuery, getRuntimeStateFindings)
 router.get('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readReviewCompletion)

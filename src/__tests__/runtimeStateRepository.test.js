@@ -17,6 +17,9 @@ import { ingestUploadedDocumentDiscoveryEvidence } from '../services/discoveryIn
 import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
 import { snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
 import { contradictionReviewRequestHash, getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
+import { postLockSubmissionId, postLockRequestDigest, postLockSourceHash } from '../services/postLockEvidenceIntakeContract.js'
+import { postLockImpactPayloadHash, postLockImpactDecisionId, postLockImpactDecisionHash } from '../services/postLockImpactDecisionContract.js'
+import { buildPostLockSuccessorCandidatePlan } from '../services/postLockSuccessorAdmissionContract.js'
 
 const getRuntimeInstance = jest.fn()
 const resolveFrameworkOutcomeStudioHandoff = jest.fn()
@@ -470,6 +473,216 @@ beforeEach(() => {
 afterAll(() => {
   collectionSpy.mockRestore()
   graphSessionSpy.mockRestore()
+})
+
+describe('public historical post-lock origin reads', () => {
+  const input = { scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }
+  const stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174501'
+  const oid = number => String(number).padStart(24, '0')
+  const unavailable = { status: 503, code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE }
+  const reserved = ['postLockAssociation', 'postLockImpactHistory', 'postLockAdmission']
+  const pair = (index = 1, { large = false, rationale = 'Explicit admission for normal draft review.' } = {}) => {
+    const submittedBy = oid(109)
+    const payload = { contractVersion: 'post-lock-evidence-submission.v1',
+      requestKey: `123e4567-e89b-42d3-a456-${String(index).padStart(12, '0')}`,
+      binding: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: oid(101), runtimeInstanceKey: 'origin-predecessor',
+        revisionNumber: 1, basisStateVersion: 'rsv2:123e4567-e89b-42d3-a456-426614174000',
+        evidenceSnapshotId: 'evidence_snapshot_123e4567-e89b-42d3-a456-426614174002', membershipHash: 'a'.repeat(64),
+        lockSnapshotId: 'origin-lock', lockSnapshotHash: 'b'.repeat(64), packageId: oid(104), packageVersion: '1.0',
+        dependencySnapshotId: 'origin-dependency', dependencySnapshotHash: 'c'.repeat(64), policyHash: 'd'.repeat(64) },
+      source: { sourceId: `manual-${index}`, sourceType: 'MANUAL_DOCUMENT', title: `Source ${index}: ${'title '.repeat(85)}end`,
+        locator: { url: `https://example.org/report/${index}`, passage: large ? '界'.repeat(2500) : 'A retained passage.', page: 2 },
+        contentHash: `sha256:${'e'.repeat(64)}`, retrievedAt: '2026-11-06T12:00:00.000Z', currentness: 'UNCONFIRMED',
+        qualifications: large ? Array.from({ length: 20 }, (_, n) => `${n}:${'界'.repeat(490)}`) : ['Not independently verified.'],
+        licensing: { licenceRef: large ? '界'.repeat(1000) : 'owner permission', retentionPermitted: true, retainUntil: null },
+        provenance: { producerKey: 'manual', producerVersion: '1', receiptRef: `origin-receipt-${index}`, acquiredAt: '2026-11-06T12:00:00.000Z' } },
+      evidence: { title: `Evidence ${index}: ${'retained title '.repeat(40)}end`,
+        statement: large ? '界'.repeat(4000) : 'A claim with  two spaces.\nA qualified second line.', sectionKeys: [] },
+      reason: large ? '界'.repeat(500) : 'Review whether this changes the successor.' }
+    const submissionId = postLockSubmissionId(payload), requestDigest = postLockRequestDigest(payload, submittedBy)
+    const association = { contractVersion: 'post-lock-evidence-association.v1', submissionId, requestKey: payload.requestKey,
+      requestDigest, binding: payload.binding, submittedBy, submittedAt: '2026-11-06T12:01:00.000Z', receiptId: oid(120), status: 'PENDING_REVIEW' }
+    const common = { ...payload.binding, stateVersion: payload.binding.basisStateVersion, sourceStateVersion: payload.binding.basisStateVersion,
+      sourceHash: postLockSourceHash(requestDigest), current: false, sourceId: `post-lock-source:${submissionId}`,
+      sourceType: payload.source.sourceType, contentHash: payload.source.contentHash,
+      lineageRef: payload.source.provenance.receiptRef, reviewStatus: 'PENDING_REVIEW' }
+    const sourceRow = { ...common, title: payload.source.title, sourceRef: payload.source.locator.url, acquisitionStatus: 'POST_LOCK_PENDING',
+      postLockAssociation: { ...association, source: payload.source } }
+    const evidenceRow = { ...common, evidenceObjectId: `post-lock:${submissionId}`, title: payload.evidence.title,
+      extractedFact: payload.evidence.statement, acceptanceState: 'POST_LOCK_PENDING',
+      postLockAssociation: { ...association, evidence: payload.evidence, reason: payload.reason } }
+    const impactRequest = { contractVersion: 'post-lock-impact-decision.v1', requestKey: '123e4567-e89b-42d3-a456-426614174100',
+      expectedBinding: payload.binding, expectedSubmissionDigest: requestDigest, expectedHeadHash: null,
+      disposition: 'SUCCESSOR_REVISION_REQUIRED', rationale: 'A human impact conclusion.', confirm: true }
+    const material = { contractVersion: impactRequest.contractVersion, decisionId: postLockImpactDecisionId(submissionId, impactRequest.requestKey),
+      payloadHash: postLockImpactPayloadHash(impactRequest, submittedBy, submissionId), requestKey: impactRequest.requestKey,
+      sequence: 1, submissionId, submissionRequestDigest: requestDigest, binding: payload.binding, reviewerUserId: submittedBy,
+      authority: 'VMF_UPDATE', disposition: impactRequest.disposition, rationale: impactRequest.rationale,
+      decidedAt: '2026-11-06T12:02:00.000Z', previousDecisionHash: null }
+    const entry = { ...material, decisionHash: postLockImpactDecisionHash(material), auditId: oid(131), auditSignatureVersion: 2 }
+    evidenceRow.postLockImpactHistory = { contractVersion: 'post-lock-impact-history.v1', entries: [entry], headHash: entry.decisionHash }
+    const plan = buildPostLockSuccessorCandidatePlan({ sourceRow, evidenceRow,
+      request: { contractVersion: 'post-lock-successor-admission.v1', requestKey: '123e4567-e89b-42d3-a456-426614174500',
+        submissionId, expectedSubmissionDigest: requestDigest, expectedBinding: payload.binding,
+        expectedImpactHeadHash: entry.decisionHash, rationale, confirm: true },
+      target: { runtimeInstanceId: RUNTIME_ID, runtimeInstanceKey: 'runtime-one', stateVersion },
+      admission: { actorUserId: submittedBy, admittedAt: '2026-11-06T12:03:00.000Z', auditId: oid(155), auditSignatureVersion: 2 } })
+    const current = { customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: RUNTIME_ID, runtimeInstanceKey: 'runtime-one',
+      current: true, stateVersion, sourceStateVersion: stateVersion, sourceHash: `sha256:${'f'.repeat(64)}`, reviewStatus: 'PENDING' }
+    return { source: { ...plan.source, ...current }, evidence: { ...plan.evidence, ...current } }
+  }
+  const setup = (pairs) => {
+    getRuntimeInstance.mockResolvedValue(makeControl({ stateVersion, revision: { revisionNumber: 2 } }))
+    const select = (rows, filter) => rows.filter(row => ['sourceId', 'evidenceObjectId'].every(key =>
+      !filter[key] || (filter[key].$in ? filter[key].$in.includes(row[key]) : filter[key] === row[key])))
+    const collection = rows => ({
+      find: jest.fn((filter, options) => {
+        let skip = 0, limit = rows.length
+        const cursor = makeCursor([])
+        cursor.skip.mockImplementation(value => { skip = value; return cursor })
+        cursor.limit.mockImplementation(value => { limit = value; return cursor })
+        cursor.toArray.mockImplementation(async () => select(rows, filter).slice(skip, skip + limit)
+          .map(row => projectRendererRow(row, options.projection)))
+        return cursor
+      }),
+      countDocuments: jest.fn(async filter => select(rows, filter).length),
+    })
+    const sources = collection(pairs.map(value => value.source)), evidence = collection(pairs.map(value => value.evidence))
+    evidence.aggregate = jest.fn(pipeline => ({ toArray: jest.fn(async () => select(pairs.map(value => value.evidence), pipeline[0].$match)
+      .map(row => ({ _id: row.sourceId, count: 1, invalidRuntimeIdentityCount: 0, invalidCurrentCount: 0,
+        versions: [row.stateVersion], sourceVersions: [row.sourceStateVersion] }))) }))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES, sources)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, evidence)
+    return { sources, evidence }
+  }
+  const expectPublicOrigin = (row, origin) => {
+    expect(row.postLockOrigin).toEqual(origin)
+    for (const key of [...reserved, 'verified', 'canAdmit', 'ready']) expect(row).not.toHaveProperty(key)
+  }
+
+  test('keeps exact historical material on source, evidence and lineage through actual projections and existing scoped queries', async () => {
+    const value = pair(), { sources, evidence } = setup([value])
+    const result = await listRuntimeStateEvidenceObjects({ ...input, pageSize: 1 })
+    for (const row of [result.evidenceObjects[0], result.sourceRegistry[0], result.lineage.sources[0]])
+      expectPublicOrigin(row, value.source.postLockOrigin)
+    expect(result.evidenceObjects[0]).toMatchObject({ title: value.evidence.title, extractedFact: value.evidence.extractedFact,
+      sourceLocation: value.evidence.sourceLocation, reviewStatus: 'PENDING', acceptanceState: 'CANDIDATE' })
+    expect(result.evidenceObjects[0].title.length).toBeGreaterThan(300)
+    expect(result.sourceRegistry[0]).toMatchObject({ label: value.source.title, sourceRef: value.source.sourceRef,
+      lineageRef: value.source.lineageRef, reviewStatus: 'PENDING', sourceCaptureAvailability: 'NOT_RECORDED' })
+    expect(evidence.find).toHaveBeenCalledTimes(1); expect(evidence.countDocuments).toHaveBeenCalledTimes(1)
+    expect(sources.find).toHaveBeenCalledTimes(1); expect(sources.countDocuments).not.toHaveBeenCalled()
+    expect(evidence.aggregate).not.toHaveBeenCalled()
+    for (const [filter, options] of [...evidence.find.mock.calls, ...sources.find.mock.calls]) {
+      expect(JSON.stringify(filter)).toContain(CUSTOMER_ID); expect(JSON.stringify(filter)).toContain(TENANT_ID)
+      expect(JSON.stringify(filter)).toContain(RUNTIME_ID)
+      expect(options.projection).toMatchObject(Object.fromEntries(['postLockOrigin', ...reserved].map(key => [key, 1])))
+      expect(options.maxTimeMS).toBeLessThanOrEqual(2000)
+    }
+    for (const key of ['postLockOrigin', ...reserved]) expect(__testables.RUNTIME_STATE_V2_CHILD_PROJECTION).not.toHaveProperty(key)
+  })
+
+  test('source-only pagination returns structural origin without loading a counterpart or adding queries', async () => {
+    const first = pair(1), second = pair(2), { sources, evidence } = setup([first, second])
+    const result = await listRuntimeStateSources({ ...input, page: 2, pageSize: 1 })
+    expect(result).toMatchObject({ total: 2, page: 2, hasMore: false })
+    expectPublicOrigin(result.sourceRegistry[0], second.source.postLockOrigin)
+    expect(sources.find).toHaveBeenCalledTimes(1); expect(sources.countDocuments).toHaveBeenCalledTimes(1)
+    expect(evidence.aggregate).toHaveBeenCalledTimes(1); expect(evidence.find).not.toHaveBeenCalled()
+    expect(evidence.countDocuments).not.toHaveBeenCalled()
+    expect(evidence.aggregate.mock.calls[0][0][0].$match.sourceId.$in).toEqual([second.source.sourceId])
+  })
+
+  test('evidence pagination pairs only the selected owners and does not reject an off-page origin source', async () => {
+    const first = pair(1), second = pair(2), { sources } = setup([first, second])
+    const result = await listRuntimeStateEvidenceObjects({ ...input, page: 2, pageSize: 1 })
+    expect(result.evidenceObjects).toHaveLength(1)
+    expectPublicOrigin(result.evidenceObjects[0], second.evidence.postLockOrigin)
+    expect(sources.find.mock.calls[0][0].sourceId.$in).toEqual([second.source.sourceId])
+    expect(sources.find.mock.results[0].value.limit).toHaveBeenCalledWith(1)
+  })
+
+  test.each(['null', 'unknown version', 'tampered material', 'different customer'])('rejects %s origin in both observed public source paths', async fault => {
+    const value = pair()
+    if (fault === 'null') value.source.postLockOrigin = null
+    if (fault === 'unknown version') value.source.postLockOrigin.contractVersion = 'unknown'
+    if (fault === 'tampered material') value.source.postLockOrigin.submission.source.qualifications.push('Unsealed change.')
+    if (fault === 'different customer') value.source.customerId = oid(999)
+    setup([value])
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject(unavailable)
+    await expect(listRuntimeStateEvidenceObjects(input)).rejects.toMatchObject(unavailable)
+  })
+
+  test.each(['source absent', 'evidence absent', 'different valid origin', 'null evidence', 'unknown evidence version', 'tampered statement', 'different evidence customer'])('rejects observed %s pair without falling back to legacy success', async fault => {
+    const value = pair()
+    if (fault === 'source absent') delete value.source.postLockOrigin
+    if (fault === 'evidence absent') delete value.evidence.postLockOrigin
+    if (fault === 'different valid origin') value.evidence.postLockOrigin = pair(1, { rationale: 'A different explicit admission rationale.' }).evidence.postLockOrigin
+    if (fault === 'null evidence') value.evidence.postLockOrigin = null
+    if (fault === 'unknown evidence version') value.evidence.postLockOrigin.contractVersion = 'unknown'
+    if (fault === 'tampered statement') value.evidence.extractedFact = 'Changed outside retained material.'
+    if (fault === 'different evidence customer') value.evidence.customerId = oid(999)
+    setup([value])
+    await expect(listRuntimeStateEvidenceObjects(input)).rejects.toMatchObject(unavailable)
+  })
+
+  test.each(['source', 'evidence'].flatMap(owner => reserved.map(field => [owner, field])))('rejects projected %s raw row containing incompatible %s', async (owner, field) => {
+    const value = pair(); value[owner][field] = null
+    const { sources, evidence } = setup([value])
+    await expect(listRuntimeStateEvidenceObjects(input)).rejects.toMatchObject(unavailable)
+    expect((owner === 'source' ? sources : evidence).find.mock.calls[0][1].projection[field]).toBe(1)
+    if (owner === 'source') await expect(listRuntimeStateSources(input)).rejects.toMatchObject(unavailable)
+  })
+
+  test('a source-only read makes no claim about a missing evidence origin or subsequent mutable review', async () => {
+    const value = pair(); delete value.evidence.postLockOrigin
+    value.source.reviewStatus = 'ACCEPTED'
+    const { evidence } = setup([value])
+    const result = await listRuntimeStateSources(input)
+    expectPublicOrigin(result.sourceRegistry[0], value.source.postLockOrigin)
+    expect(result.sourceRegistry[0].reviewStatus).toBe('ACCEPTED')
+    expect(evidence.find).not.toHaveBeenCalled()
+  })
+
+  test('later current state and working review may change without rewriting historical target material', async () => {
+    const value = pair(), later = 'rsv2:123e4567-e89b-42d3-a456-426614174502'
+    for (const row of [value.source, value.evidence]) Object.assign(row, { stateVersion: later, sourceStateVersion: later, reviewStatus: 'ACCEPTED' })
+    value.evidence.acceptanceState = 'ACCEPTED'
+    setup([value]); getRuntimeInstance.mockResolvedValue(makeControl({ stateVersion: later, revision: { revisionNumber: 3 } }))
+    const result = await listRuntimeStateEvidenceObjects(input)
+    expectPublicOrigin(result.evidenceObjects[0], value.evidence.postLockOrigin)
+    expect(result.evidenceObjects[0]).toMatchObject({ stateVersion: later, reviewStatus: 'ACCEPTED', acceptanceState: 'ACCEPTED' })
+    expect(result.evidenceObjects[0].postLockOrigin.admission.target.stateVersion).toBe(stateVersion)
+  })
+
+  test('legacy absence preserves existing DTO trimming, truncation and query counts', async () => {
+    const value = pair()
+    delete value.source.postLockOrigin; delete value.evidence.postLockOrigin
+    value.evidence.title = `  ${'x'.repeat(400)}  `; value.evidence.extractedFact = '  ordinary fact  '
+    const { sources, evidence } = setup([value])
+    const result = await listRuntimeStateEvidenceObjects(input)
+    expect(result.evidenceObjects[0]).toMatchObject({ title: 'x'.repeat(300), extractedFact: 'ordinary fact' })
+    for (const row of [result.evidenceObjects[0], result.sourceRegistry[0], result.lineage.sources[0]]) expect(row).not.toHaveProperty('postLockOrigin')
+    expect(evidence.find).toHaveBeenCalledTimes(1); expect(evidence.countDocuments).toHaveBeenCalledTimes(1)
+    expect(sources.find).toHaveBeenCalledTimes(1); expect(evidence.aggregate).not.toHaveBeenCalled()
+  })
+
+  test('valid large material fits one selected item but a larger response fails the unchanged byte cap', async () => {
+    const values = [pair(1, { large: true }), pair(2, { large: true }), pair(3, { large: true })]
+    expect(Buffer.byteLength(JSON.stringify(values[0].source.postLockOrigin))).toBeLessThanOrEqual(96 * 1024)
+    const { sources, evidence } = setup(values)
+    const bounded = await listRuntimeStateEvidenceObjects({ ...input, pageSize: 1 })
+    expectPublicOrigin(bounded.evidenceObjects[0], values[0].evidence.postLockOrigin)
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    await expect(listRuntimeStateEvidenceObjects({ ...input, pageSize: 3 })).rejects.toMatchObject(unavailable)
+    for (const collection of [sources, evidence]) {
+      const cursor = collection.find.mock.results.at(-1).value
+      const rows = await cursor.toArray()
+      expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+      expect(rows).toHaveLength(3)
+    }
+    expect(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES).toBe(512 * 1024)
+  })
 })
 
 describe('immutable lock membership control boundary', () => {

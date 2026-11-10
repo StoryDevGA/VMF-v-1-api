@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { projectPostLockOrigin, assertPostLockOriginPairs } from './postLockSuccessorAdmissionContract.js'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveSourceRecordedReview } from './sourceVerificationContext.js'
 import { projectControlledReplayProvenance, assertControlledReplayProvenancePairs } from './controlledReplayContract.js'
@@ -67,6 +68,7 @@ export const buildRuntimeSectionEvidenceQualifications = ({ evidenceObjects = []
     if (!sourceId) fail()
     evidence.set(evidenceObjectId, { evidenceObjectId, sourceId,
       ...projectControlledReplayProvenance(row),
+      ...projectPostLockOrigin(row, 'evidence'),
       reviewStatus: optionalText(row.reviewStatus, 80), validationStatus: optionalText(row.validationStatus, 80),
       acquisitionMethod: optionalText(row.acquisitionMethod, 120), confidence: confidence(row.confidence),
       ...(row.evidenceSupport !== undefined ? { evidenceSupport: validateEvidenceSupport(row.evidenceSupport,
@@ -82,14 +84,21 @@ export const buildRuntimeSectionEvidenceQualifications = ({ evidenceObjects = []
   for (const sourceId of sourceIds) {
     const source = registry.get(sourceId), origin = lineage.get(sourceId)
     if (source && origin && !isDeepStrictEqual(projectControlledReplayProvenance(source), projectControlledReplayProvenance(origin))) fail()
+    if (source && origin && !isDeepStrictEqual(projectPostLockOrigin(source, 'source'), projectPostLockOrigin(origin, 'source'))) fail()
   }
   assertSourceEvidenceMetadataPairs({ sources: [...registry.values()],
     evidenceObjects: evidenceObjects.filter(row => admitted.has(identity(row?.evidenceObjectId))) })
+  const selectedEvidence = evidenceObjects.filter(row => admitted.has(identity(row?.evidenceObjectId)))
+  // indexSources already restricts both maps to the selected evidence's source IDs.
+  assertPostLockOriginPairs({ sources: [...registry.values()], evidenceObjects: selectedEvidence })
+  assertPostLockOriginPairs({ sources: [...lineage.values()], evidenceObjects: selectedEvidence })
   const sources = [...sourceIds].sort().map(sourceId => {
     const source = registry.get(sourceId)
     const origin = lineage.get(sourceId)
     return { sourceId, sourceRecordStatus: source ? 'AVAILABLE' : 'UNAVAILABLE',
       ...(source ? projectControlledReplayProvenance(source) : {}),
+      // Historical origin retains qualifications; it does not authenticate the source.
+      ...(source ? projectPostLockOrigin(source, 'source') : {}),
       ...(source?.sourceCapture !== undefined ? { sourceCapture: validateSourceCapture(source.sourceCapture,
         { sourceId, contentHash: source.contentHash }) } : {}),
       recordedSourceType: optionalText(source?.sourceType, 100),

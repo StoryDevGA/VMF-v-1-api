@@ -2264,6 +2264,11 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
       sortedValues(extractClientOptionValues(clientConstantsSource, 'EVENT_SEVERITY_OPTIONS')),
     ).toEqual(sortedValues(Object.values(GOVERNANCE_AUDIT_SEVERITIES)))
   })
+  test.each(['POST_LOCK_EVIDENCE_SUBMITTED', 'POST_LOCK_IMPACT_DECISION_RECORDED'])('SS-056 action %s is selectable exactly once in the existing client catalogue', action => {
+    const clientConstantsSource = fs.readFileSync(clientAuditLogConstantsPath, 'utf8')
+    expect(AUDIT_ACTIONS[action]).toBe(action)
+    expect(extractClientOptionValues(clientConstantsSource, 'ACTION_OPTIONS').filter(value => value === action)).toEqual([action])
+  })
 
   test('audit-shaped seed data references only registered audit constants', () => {
     const auditSeedRecords = listJsonSeedFiles(docsSeedDataDir)

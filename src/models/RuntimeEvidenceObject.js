@@ -1,4 +1,7 @@
 import mongoose from 'mongoose'
+import { validPostLockRow } from '../services/postLockEvidenceIntakeContract.js'
+import { validPostLockImpactHistoryRow } from '../services/postLockImpactDecisionContract.js'
+import { projectPostLockOrigin, validPostLockAdmissionRow } from '../services/postLockSuccessorAdmissionContract.js'
 import { validateEvidenceSupport } from '../services/sourceEvidenceContract.js'
 import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance,
   controlledReplayProvenanceForRow } from '../services/controlledReplayContract.js'
@@ -52,7 +55,24 @@ const evidenceSupportSchema = new mongoose.Schema({
 
 const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_objects',
+  validatePostLockAssociation: row => validPostLockRow(row, 'evidence'),
   fields: {
+    postLockOrigin: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true, validate: {
+      validator: function (value) {
+        if (value === undefined) return true
+        try { projectPostLockOrigin(this.toObject({ depopulate: true }), 'evidence'); return true } catch { return false }
+      }, message: 'Invalid historical post-lock evidence origin.',
+    } },
+    postLockAdmission: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true, validate: {
+      validator: function (value) { return value === undefined || validPostLockAdmissionRow(this.toObject({ depopulate: true })) },
+      message: 'Invalid pending evidence admission receipt.',
+    } },
+    postLockImpactHistory: { type: mongoose.Schema.Types.Mixed, default: undefined,
+      validate: { validator: function (value) { return value === undefined || validPostLockImpactHistoryRow(this) },
+        message: 'Invalid retained post-lock impact history.' } },
+    postLockAssociation: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true,
+      validate: { validator: function (value) { return value === undefined || validPostLockRow(this, 'evidence') },
+        message: 'Invalid pending post-lock evidence association.' } },
     controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined,
       set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(
         value instanceof mongoose.Document ? value.toObject() : value), validate: {

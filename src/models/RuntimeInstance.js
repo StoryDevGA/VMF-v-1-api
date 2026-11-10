@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { validPostLockRevisionAdmission } from '../services/postLockSuccessorAdmissionContract.js'
 
 export const RUNTIME_INSTANCE_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -173,6 +174,12 @@ const releaseBindingHistorySchema = new mongoose.Schema({
 
 const runtimeRevisionSchema = new mongoose.Schema(
   {
+    postLockAdmission: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true, validate: {
+      validator: function (value) {
+        const owner = this.ownerDocument()
+        return value === undefined || validPostLockRevisionAdmission(owner.toObject({ depopulate: true }), { initial: owner.isNew })
+      }, message: 'Invalid historical revision admission receipt.',
+    } },
     revisionNumber: {
       type: Number,
       min: 1,

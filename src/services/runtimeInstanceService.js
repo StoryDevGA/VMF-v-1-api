@@ -1655,6 +1655,7 @@ export const getRuntimeInstance = async ({
   if (internalEvidenceSnapshotToken === EVIDENCE_SNAPSHOT_INTERNAL_READ) {
     const pointer = runtimeInstance.lockedEvidenceSnapshot
     result.__evidenceSnapshotControl = {
+      pointerRecorded: Object.hasOwn(runtimeInstance, 'lockedEvidenceSnapshot'),
       ...(pointer ? { pointer: typeof pointer.toObject === 'function' ? pointer.toObject() : structuredClone(pointer) } : {}),
       runtime: copyControlledReplayIsolationWitness(result, { ...result, _id: result.id }),
     }

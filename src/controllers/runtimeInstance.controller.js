@@ -271,17 +271,21 @@ export const createRuntimeInstance = async (req, res, next) => {
 
 export const createRuntimeRevision = async (req, res, next) => {
   try {
+    const admissionBinding = req.body?.postLockAdmission?.expectedBinding
     const runtimeInstance = await createRuntimeRevisionRecord({
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
-      scopes: req.scopes,
+      scopes: admissionBinding ? buildRuntimeStateRequestScopes({ scopes: req.scopes, query: {
+        customerId: admissionBinding.customerId, tenantId: admissionBinding.tenantId,
+      } }) : req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       payload: req.body,
     })
 
-    return res.status(201).json({
-      data: runtimeInstance,
-      meta: { requestId: req.requestId, version: 'v1' },
+    const admission = Object.hasOwn(req.body || {}, 'postLockAdmission') ? runtimeInstance.admission : null
+    return res.status(admission?.replayed ? 200 : 201).json({
+      data: admission ? runtimeInstance.runtimeInstance : runtimeInstance,
+      meta: { requestId: req.requestId, version: 'v1', ...(admission ? { admission } : {}) },
     })
   } catch (err) {
     if (err?.status && err?.code) {
@@ -1909,3 +1913,83 @@ export const executeRuntimeAction = async (req, res, next) => {
     return next(err)
   }
 }
+import { submitPostLockEvidence } from '../services/postLockEvidenceIntakeService.js'
+import { createPostLockReadBudget, readPostLockEvidenceState,
+  assertPostLockReadResponseEnvelope } from '../services/postLockEvidenceReadStateService.js'
+import { listPostLockEvidence, normalizePostLockEvidenceListError } from '../services/postLockEvidenceListService.js'
+import { assertPostLockEvidenceListResponseEnvelope } from '../services/postLockEvidenceListContract.js'
+import { readPostLockOperationalCapability, normalizePostLockOperationalCapabilityError } from '../services/postLockEvidenceOperationalCapabilityService.js'
+import { assertPostLockOperationalCapabilityEnvelope } from '../services/postLockEvidenceOperationalCapabilityContract.js'
+
+export const getRuntimePostLockOperationalCapability = async (req, res, next) => {
+  const readBudget = createPostLockReadBudget()
+  try {
+    const data = await readPostLockOperationalCapability({ scopes: getRuntimeStateRequestScopes(req),
+      runtimeInstanceId: req.params.runtimeInstanceId, actorUserId: req.context?.userId || req.userId }, { readBudget })
+    const response = { data, meta: { requestId: req.requestId, version: 'v1' } }
+    readBudget.check()
+    assertPostLockOperationalCapabilityEnvelope(response)
+    readBudget.check()
+    return res.status(200).json(response)
+  } catch (caught) {
+    const error = normalizePostLockOperationalCapabilityError(caught, readBudget)
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
+  }
+}
+
+export const getRuntimePostLockEvidenceList = async (req, res, next) => {
+  const readBudget = createPostLockReadBudget()
+  try {
+    const data = await listPostLockEvidence({ scopes: getRuntimeStateRequestScopes(req),
+      runtimeInstanceId: req.params.runtimeInstanceId, query: req.query }, { readBudget })
+    const response = { data, meta: { requestId: req.requestId, version: 'v1' } }
+    readBudget.check()
+    assertPostLockEvidenceListResponseEnvelope(response)
+    readBudget.check()
+    return res.status(200).json(response)
+  } catch (caught) {
+    const error = normalizePostLockEvidenceListError(caught, readBudget)
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
+  }
+}
+
+const sendPostLockEvidence = async (req, res, next, write) => {
+  try {
+    const args = { scopes: buildRuntimeStateRequestScopes({ scopes: req.scopes, query: req.query }),
+      runtimeInstanceId: req.params.runtimeInstanceId, submissionId: req.params.submissionId,
+      actorUserId: req.context?.userId || req.userId, payload: req.body, auditRequest: req }
+    const readBudget = write ? null : createPostLockReadBudget()
+    const data = await (write ? submitPostLockEvidence(args) : readPostLockEvidenceState(args, { readBudget }))
+    const response = { data, meta: { requestId: req.requestId, version: 'v1' } }
+    if (readBudget) {
+      readBudget.check()
+      assertPostLockReadResponseEnvelope(response)
+      readBudget.check()
+    }
+    return res.status(write && !data.replayed ? 201 : 200).json(response)
+  } catch (error) {
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
+  }
+}
+export const submitRuntimePostLockEvidence = (req, res, next) => sendPostLockEvidence(req, res, next, true)
+export const getRuntimePostLockEvidence = (req, res, next) => sendPostLockEvidence(req, res, next, false)
+
+import { recordPostLockImpactDecision, readPostLockImpactHistory } from '../services/postLockImpactDecisionService.js'
+const sendPostLockImpact = async (req, res, next, write) => {
+  try {
+    const args = { scopes: buildRuntimeStateRequestScopes({ scopes: req.scopes, query: req.query }),
+      runtimeInstanceId: req.params.runtimeInstanceId, submissionId: req.params.submissionId,
+      actorUserId: req.context?.userId || req.userId, payload: req.body, auditRequest: req,
+      afterSequence: req.query.afterSequence, limit: req.query.limit }
+    const data = await (write ? recordPostLockImpactDecision(args) : readPostLockImpactHistory(args))
+    return res.status(write && !data.replayed ? 201 : 200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (error) {
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
+  }
+}
+export const recordRuntimePostLockImpact = (req, res, next) => sendPostLockImpact(req, res, next, true)
+export const getRuntimePostLockImpactHistory = (req, res, next) => sendPostLockImpact(req, res, next, false)

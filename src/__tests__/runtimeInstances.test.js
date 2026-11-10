@@ -1,4 +1,5 @@
 import FrameworkPackageDisplayBinding from '../models/FrameworkPackageDisplayBinding.js'
+import { membershipError } from '../services/runtimeEvidenceSnapshotContract.js'
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
 import { createHash, randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -840,6 +841,41 @@ const withLockMembershipTransaction = async (runtime, work, { auditFailure = fal
     replace(Role, 'find', jest.fn(() => boundedQuery(buildDefaultRoleRows())))
     replace(Customer, 'findById', jest.fn(() => boundedQuery(makeCustomer())))
     replace(Tenant, 'findById', jest.fn(() => boundedQuery(makeTenant())))
+    // The passive read classifies native evidence in the same snapshot session.
+    // Select from the owned rows rather than assuming a successful empty read.
+    for (const [model, kind, family] of [[Source, 'evidenceSources', 'source'], [Evidence, 'evidenceObjects', 'evidence']]) {
+      replace(model, 'findOne', jest.fn(filter => {
+        const current = saved || runtime
+        expect(filter).toEqual({ customerId: String(current.customerId), tenantId: String(current.tenantId),
+          runtimeInstanceId: String(current._id), runtimeInstanceKey: current.runtimeInstanceKey,
+          stateVersion: current.stateVersion, current: true, controlledReplayProvenance: { $exists: true } })
+        let selectedSession = null, projection, limit, maxTimeMS, readOptions
+        const query = {
+          select: jest.fn(value => { projection = value; expect(value).toEqual({ _id: 1 }); return query }),
+          maxTimeMS: jest.fn(value => { maxTimeMS = value; expect(value).toBeGreaterThan(0); expect(value).toBeLessThanOrEqual(2000); return query }),
+          limit: jest.fn(value => { limit = value; expect(value).toBe(1); return query }),
+          batchSize: jest.fn(value => { expect(value).toBe(1); return query }),
+          session: jest.fn(value => { expect(value).toBe(session); selectedSession = value; return query }),
+          setOptions: jest.fn(value => {
+            expect(selectedSession).toBe(session)
+            expect(value.maxTimeMS).toBeGreaterThan(0); expect(value.maxTimeMS).toBeLessThanOrEqual(2000)
+            expect(value.timeoutMS).toBeGreaterThan(0); expect(value.timeoutMS).toBeLessThanOrEqual(5500)
+            readOptions = value; return query
+          }),
+          lean: jest.fn(async () => {
+            expect(projection).toEqual({ _id: 1 }); expect(limit).toBe(1); expect(maxTimeMS).toBeGreaterThan(0)
+            readQueries.push({ name: model.collection.name, operation: 'controlledReplayIsolation',
+              filter, session: selectedSession, maxTimeMS, readOptions })
+            if (faults.isolationReadFailure === family) throw new Error('Controlled classification dependency rejected')
+            const row = allRows[kind].find(item => item.current === true && item.stateVersion === filter.stateVersion
+              && ['customerId', 'tenantId', 'runtimeInstanceId', 'runtimeInstanceKey'].every(key => String(item[key]) === filter[key])
+              && Object.hasOwn(item, 'controlledReplayProvenance'))
+            return row ? { _id: row._id } : null
+          }),
+        }
+        return query
+      }))
+    }
   }
   replace(RuntimeInstance.collection, 'findOne', jest.fn(async (_filter, options) => {
     expect(options.session).toBe(session); return options.projection ? { framework_state: saved.framework_state } : saved
@@ -871,7 +907,11 @@ const withLockMembershipTransaction = async (runtime, work, { auditFailure = fal
     const actual = key.split('.').reduce((value, field) => value?.[field], row)
     return expected?.$in ? expected.$in.some(item => String(item) === String(actual)) : String(expected) === String(actual)
   })
-  replace(mongoose.connection, 'db', { collection: name => ({ find: (filter, options) => {
+  replace(mongoose.connection, 'db', { collection: name => ({ countDocuments: async (filter, options) => {
+    expect(options.session).toBe(session)
+    const kind = { runtime_section_states: 'sections', runtime_evidence_sources: 'evidenceSources', runtime_evidence_objects: 'evidenceObjects' }[name]
+    return allRows[kind].filter(row => matches(row, filter)).length
+  }, find: (filter, options) => {
     expect(options.session).toBe(session)
     if (faults.readFailure) throw new Error('Controlled storage read unavailable')
     readQueries.push({ name, filter, options })
@@ -912,9 +952,11 @@ const withLockMembershipTransaction = async (runtime, work, { auditFailure = fal
     expect(options.session).toBe(session); order.push('audit')
     if (auditFailure) throw new Error('audit unavailable')
     staged.push('audit')
-    const dto = { ...event, id: '64b000000000000000000010', signatureVersion: 1 }
-    savedAudit = { ...dto, _id: new mongoose.Types.ObjectId(dto.id) }
-    return dto
+    const document = new AuditLog({ ...event, _id: new mongoose.Types.ObjectId('64b000000000000000000010'),
+      ts: new Date(event.diff.actionedAt) })
+    document.generateSignature()
+    savedAudit = document.toObject()
+    return { ...savedAudit, id: String(document._id) }
   }))
   replace(Snapshot, 'create', jest.fn(async (documents, options) => {
     expect(options.session).toBe(session); order.push('membership'); staged.push('membership')
@@ -18665,7 +18707,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
   })
 
   describe('unknown LOCK outcome passive exact winner readback', () => {
-    test.each(['complete', 'missing-snapshot', 'missing-audit', 'material', 'pointer', 'audit-actor', 'audit-time', 'audit-scope', 'revision', 'storage', 'budget', 'missing-package', 'ambiguous-package'])('%s never redispatches or invents a verified winner', async corruption => {
+    test.each(['complete', 'missing-snapshot', 'missing-audit', 'material', 'pointer', 'audit-actor', 'audit-time', 'audit-scope', 'revision', 'storage', 'budget', 'missing-package', 'ambiguous-package', 'source-isolation-failure', 'evidence-isolation-failure', 'audit-signature-missing', 'audit-signature-tampered', 'audit-signed-material'])('%s never redispatches or invents a verified winner', async corruption => {
       const runtime = makePublishedLockMembershipFixture()
       mockRuntimeInstanceForActionExecution({ document: runtime })
       RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
@@ -18689,15 +18731,27 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         if (corruption === 'audit-actor') audit().actorUserId = REGULAR_USER_ID
         if (corruption === 'audit-time') audit().diff.actionedAt = '2026-05-19T08:03:00.000Z'
         if (corruption === 'audit-scope') audit().scope.tenantId = OTHER_TENANT_ID
+        if (corruption === 'audit-signature-missing') delete audit().signature
+        if (corruption === 'audit-signature-tampered') audit().signature = '0'.repeat(64)
+        if (corruption === 'audit-signed-material') audit().diff.unverifiedExtraField = 'Changed after signing'
         if (corruption === 'revision') saved().revision.revisionNumber = 2
         if (corruption === 'storage') faults.readFailure = true
         if (corruption === 'budget') faults.budgetExceeded = true
         if (corruption === 'missing-package') faults.packageLookup = 'missing'
         if (corruption === 'ambiguous-package') faults.packageLookup = 'ambiguous'
+        if (corruption === 'source-isolation-failure') faults.isolationReadFailure = 'source'
+        if (corruption === 'evidence-isolation-failure') faults.isolationReadFailure = 'evidence'
         const beforeWrites = writeCounts()
+        const beforeReadCount = readQueries.length
         const beforeMaterial = JSON.stringify({ root: saved(), rows, snapshots, audit: audit() })
         const readback = await request.get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/lock-basis`)
           .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID }).set('Authorization', `Bearer ${token}`)
+        const classificationReads = readQueries.slice(beforeReadCount).filter(query => query.operation === 'controlledReplayIsolation')
+        expect(classificationReads).toHaveLength(corruption === 'source-isolation-failure' ? 1 : 2)
+        for (const query of classificationReads) {
+          expect(query.session).toBe(session)
+          expect(query.readOptions).toMatchObject({ maxTimeMS: expect.any(Number), timeoutMS: expect.any(Number) })
+        }
         if (corruption === 'complete') {
           expect(readback.status).toBe(200)
           expect(readback.body.data.lockBasis.frozenInventory.reason).toBeNull()
@@ -18714,7 +18768,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             fullLegacyFrameworkStateFetched: false })
           expect(readQueries.some(query => query.name === 'runtime_section_states' && !Object.hasOwn(query.filter, 'current') && query.filter._id.$in.length)).toBe(true)
           expect(session.startTransaction).toHaveBeenCalledWith(expect.objectContaining({ readConcern: { level: 'snapshot' }, readPreference: 'primary' }))
-        } else if (['storage', 'budget'].includes(corruption)) expect(readback.status).toBe(503)
+        } else if (['storage', 'budget', 'source-isolation-failure', 'evidence-isolation-failure'].includes(corruption)) expect(readback.status).toBe(503)
         else if (['missing-package', 'ambiguous-package'].includes(corruption)) {
           expect(readback.status).toBe(409)
           expect(readback.body.error.details.reason).toBe('POST_LOCK_POLICY_BINDING_UNVERIFIED')
@@ -18728,6 +18782,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             'missing-snapshot': 'SNAPSHOT_MISSING_OR_AMBIGUOUS', 'missing-audit': 'AUDIT_LINK_INVALID',
             material: 'MEMBER_MATERIAL_CHANGED', pointer: 'POINTER_BINDING_INVALID', 'audit-actor': 'AUDIT_LINK_INVALID',
             'audit-time': 'AUDIT_LINK_INVALID', 'audit-scope': 'AUDIT_LINK_INVALID', revision: 'ROOT_REVISION_MISSING',
+            'audit-signature-missing': 'AUDIT_SIGNATURE_INVALID', 'audit-signature-tampered': 'AUDIT_SIGNATURE_INVALID',
+            'audit-signed-material': 'AUDIT_SIGNATURE_INVALID',
           }[corruption])
         }
         expect(JSON.stringify(readback.body)).not.toMatch(/lockedEvidenceSnapshot|__evidenceSnapshotControl|lockAuditId|"materialHash":|sectionDetail/)
@@ -36486,6 +36542,640 @@ describe('qualification-aware native REGENERATE owner', () => {
 
 // Actual app middleware/router/controller/repository over in-memory HTTP streams.
 // Storage/session models below are effects seams, not Mongo/JWT deployment proof.
+describe('post-lock exact-item mounted read states', () => {
+  const route = () => `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence/${'f'.repeat(64)}`
+  const scope = { customerId: CUSTOMER_ID, tenantId: TENANT_ID }
+  const boundedQuery = value => {
+    const promise = Promise.resolve(value)
+    return { ...buildLeanQuery(value), setOptions: jest.fn().mockReturnThis(), session: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(), then: promise.then.bind(promise), catch: promise.catch.bind(promise) }
+  }
+  const withReadSession = async (work, retry) => {
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    let active = false
+    const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: jest.fn(async callback => {
+      active = true
+      try { return retry ? await retry(callback) : await callback() } finally { active = false }
+    }) }
+    const start = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+    try { return await work(session) }
+    finally {
+      start.mockRestore()
+      if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+      else delete mongoose.connection.readyState
+    }
+  }
+  const expectReadError = (response, status, code, reason) => {
+    expect(response.status).toBe(status)
+    expect(response.body.error).toMatchObject({ code, ...(reason ? { details: { reason } } : {}) })
+    expect(response.body).not.toHaveProperty('data')
+    expect(response.body).not.toHaveProperty('readState')
+    expect(JSON.stringify(response.body)).not.toMatch(/private dependency detail|private timeout detail|mongodb:\/\/|stackTrace/)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  }
+  test('requires authentication before exact-item reads', async () => {
+    const response = await request.get(route()).query(scope)
+    expectReadError(response, 401, 'UNAUTHENTICATED')
+  })
+  test('strict exact-item parameters reject before a database read', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const response = await request.get(route().replace('f'.repeat(64), 'invalid')).query(scope).set('Authorization', `Bearer ${token}`)
+    expectReadError(response, 422, 'VALIDATION_FAILED')
+  })
+  test('a real mounted view-only caller reaches protected missing-item readback without needing VMF_UPDATE', async () => {
+    const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+    const restores = [], replace = (object, field, value) => { const original = object[field]; restores.push(() => { object[field] = original }); object[field] = value }
+    const emptyCursor = () => { const cursor = { limit: () => cursor, toArray: async () => [] }; return cursor }
+    replace(RuntimeInstance, 'findOne', jest.fn(() => boundedQuery(makeRuntimeInstance())))
+    replace(Customer, 'findById', jest.fn(() => boundedQuery(makeCustomer())))
+    replace(Tenant, 'findById', jest.fn(() => boundedQuery(makeTenant())))
+    replace(Role, 'find', jest.fn(() => boundedQuery(buildDefaultRoleRows())))
+    for (const model of [Source, RuntimeEvidenceObject]) {
+      replace(model, 'findOne', jest.fn(() => boundedQuery(null)))
+      replace(model.collection, 'find', jest.fn(emptyCursor))
+    }
+    try {
+      const token = await getAccessTokenForUser(makeRegularUser())
+      await withReadSession(async session => {
+        const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+        expectReadError(response, 404, 'NOT_FOUND', 'POST_LOCK_SUBMISSION_NOT_FOUND')
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+        expect(session.withTransaction.mock.calls[0][1]).toMatchObject({ timeoutMS: expect.any(Number), readConcern: { level: 'snapshot' } })
+        expect(RuntimeInstance.findOne.mock.calls[0][0].$and).toEqual(expect.arrayContaining([{ customerId: CUSTOMER_ID }, { tenantId: TENANT_ID }]))
+        for (const model of [Source, RuntimeEvidenceObject]) expect(model.collection.find).toHaveBeenCalledTimes(1)
+      })
+    } finally { restores.reverse().forEach(restore => restore()) }
+  })
+  test('selected foreign scope cannot read the own-scope runtime through the exact-item service', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    // Model the actual scoped Mongo lookup: the existing own-scope row is not
+    // returned merely because it shares the requested runtime identity.
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(null))
+    await withReadSession(async () => {
+      const response = await request.get(route()).query({ customerId: OTHER_CUSTOMER_ID, tenantId: OTHER_TENANT_ID }).set('Authorization', `Bearer ${token}`)
+      expectReadError(response, 404, 'NOT_FOUND', 'RUNTIME_INSTANCE_NOT_FOUND')
+      expect(RuntimeInstance.findOne.mock.calls[0][0].$and).toEqual(expect.arrayContaining([
+        { customerId: OTHER_CUSTOMER_ID }, { tenantId: OTHER_TENANT_ID },
+      ]))
+    })
+  })
+  test('missing VMF_VIEW remains forbidden before exact-item material reads', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    Role.find.mockReturnValue(boundedQuery(buildDefaultRoleRows().map(row => ({ ...row, permissions: [] }))))
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withReadSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectReadError(response, 403, 'FORBIDDEN')
+      expect(response.body.error.details.permission).toBe('VMF_VIEW')
+    })
+  })
+  test.each([
+    ['dependency', new Error('private dependency detail'), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEPENDENCY_UNAVAILABLE'],
+    ['unrecognized typed dependency', Object.assign(new Error('private dependency detail'), { status: 503, code: 'SERVICE_UNAVAILABLE',
+      details: { reason: 'UNKNOWN_TYPED_DEPENDENCY' } }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEPENDENCY_UNAVAILABLE'],
+    ['recognized timeout', Object.assign(new Error('private timeout detail'), { code: 50 }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEADLINE_EXCEEDED'],
+    ['selection error without timeout identity', Object.assign(new Error('private timeout detail'), { name: 'MongoServerSelectionError' }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEPENDENCY_UNAVAILABLE'],
+    ['protected not found', Object.assign(new Error('Missing protected runtime.'), { status: 404, code: 'NOT_FOUND', details: { reason: 'RUNTIME_INSTANCE_NOT_FOUND' } }), 404, 'NOT_FOUND', 'RUNTIME_INSTANCE_NOT_FOUND'],
+    ['protected frozen material', membershipError('MEMBERSHIP_BYTE_BOUND'), 409, 'RUNTIME_EVIDENCE_MEMBERSHIP_INVALID', 'MEMBERSHIP_BYTE_BOUND'],
+  ])('%s runtime lookup rejection returns its exact mounted error without partial data', async (_label, fault, status, code, reason) => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), query = boundedQuery(null)
+    query.lean.mockRejectedValue(fault); RuntimeInstance.findOne.mockReturnValue(query)
+    await withReadSession(async session => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectReadError(response, status, code, reason)
+      expect(session.withTransaction).toHaveBeenCalledTimes(1)
+      expect(session.endSession).toHaveBeenCalledTimes(1)
+    })
+  })
+  test('a transient lookup error reaches the transaction retry owner before final dependency translation', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const startedAt = Date.now(); let elapsed = 0
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => startedAt + elapsed)
+    const transient = Object.assign(new Error('private dependency detail'), { hasErrorLabel: label => label === 'TransientTransactionError' })
+    const query = boundedQuery(null)
+    query.lean.mockRejectedValueOnce(transient).mockRejectedValueOnce(new Error('private dependency detail'))
+    RuntimeInstance.findOne.mockReturnValue(query)
+    let callbackAttempts = 0
+    try {
+      await withReadSession(async () => {
+        const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+        expectReadError(response, 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEPENDENCY_UNAVAILABLE')
+        expect(query.lean).toHaveBeenCalledTimes(2)
+        expect(callbackAttempts).toBe(2)
+        expect(query.setOptions.mock.calls.map(([options]) => options.maxTimeMS)).toEqual([2000, 100])
+      }, async callback => {
+        callbackAttempts++
+        try { return await callback() }
+        catch (error) {
+          expect(error).toBe(transient)
+          expect(error.hasErrorLabel('TransientTransactionError')).toBe(true)
+          elapsed = 5900; callbackAttempts++; return callback()
+        }
+      })
+    } finally { clock.mockRestore() }
+  })
+  test('an exhausted shared deadline outranks an unclassified rejected dependency', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), startedAt = Date.now()
+    let elapsed = 0
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => startedAt + elapsed)
+    const query = boundedQuery(null)
+    query.lean.mockImplementation(async () => { elapsed = 6001; throw new Error('private dependency detail') })
+    RuntimeInstance.findOne.mockReturnValue(query)
+    try {
+      await withReadSession(async () => {
+        const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+        expectReadError(response, 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_READ_STATE_DEADLINE_EXCEEDED')
+      })
+    } finally { clock.mockRestore() }
+  })
+})
+
+describe('post-lock receipt-list mounted guards', () => {
+  const route = () => `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence`
+  const scope = { customerId: CUSTOMER_ID, tenantId: TENANT_ID }
+  const boundedQuery = value => {
+    const promise = Promise.resolve(value)
+    return { ...buildLeanQuery(value), lean: jest.fn().mockReturnThis(), setOptions: jest.fn().mockReturnThis(), session: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(), then: promise.then.bind(promise), catch: promise.catch.bind(promise) }
+  }
+  const withSession = async work => {
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    let active = false
+    const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: async callback => {
+      active = true
+      try { return await callback() } finally { active = false }
+    } }
+    const start = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+    try { return await work(session) }
+    finally {
+      start.mockRestore()
+      if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+      else delete mongoose.connection.readyState
+    }
+  }
+  const expectError = (response, status, code, reason) => {
+    expect({ status: response.status, error: response.body.error }).toMatchObject({ status,
+      error: { code, ...(reason ? { details: { reason } } : {}) } })
+    expect(response.body).not.toHaveProperty('data')
+    expect(JSON.stringify(response.body)).not.toMatch(/private dependency detail|private timeout detail|private-cursor-detail|mongodb:\/\/|stackTrace/)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  }
+  test('requires authentication before listing original receipts', async () => {
+    expectError(await request.get(route()).query(scope), 401, 'UNAUTHENTICATED')
+  })
+  test.each(['0', '11', '01', '1.0', '1e0', 'true', '', ['1', '2']])('rejects noncanonical page size %j before lookup', async pageSize => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    const response = await request.get(route()).query({ ...scope, pageSize }).set('Authorization', `Bearer ${token}`)
+    expectError(response, 422, 'VALIDATION_FAILED', 'POST_LOCK_EVIDENCE_LIST_QUERY_INVALID')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+  test.each([
+    ['missing tenant', { customerId: CUSTOMER_ID }],
+    ['unknown count', { ...scope, pendingCount: 'true' }],
+    ['duplicate cursor', { ...scope, cursor: ['one', 'two'] }],
+  ])('rejects %s in the strict list query', async (_label, query) => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    const response = await request.get(route()).query(query).set('Authorization', `Bearer ${token}`)
+    expectError(response, 422, 'VALIDATION_FAILED', 'POST_LOCK_EVIDENCE_LIST_QUERY_INVALID')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+  test('rejects a malformed cursor without lookup or reflected contents', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    const response = await request.get(route()).query({ ...scope, cursor: 'private-cursor-detail' }).set('Authorization', `Bearer ${token}`)
+    expectError(response, 422, 'VALIDATION_FAILED', 'POST_LOCK_EVIDENCE_LIST_CURSOR_INVALID')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+  test('view-only callers reach the existing unlocked-basis conflict through the collection route', async () => {
+    Customer.findById = jest.fn(() => boundedQuery(makeCustomer()))
+    Tenant.findById = jest.fn(() => boundedQuery(makeTenant()))
+    Role.find = jest.fn(() => boundedQuery(buildDefaultRoleRows()))
+    const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+    Source.findOne = jest.fn(() => boundedQuery(null))
+    RuntimeEvidenceObject.findOne = jest.fn(() => boundedQuery(null))
+    const token = await getAccessTokenForUser(makeRegularUser())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query({ ...scope, pageSize: '1' }).set('Authorization', `Bearer ${token}`)
+      expectError(response, 409, 'CONFLICT', 'POST_LOCK_BINDING_STALE')
+      expect(RuntimeInstance.findOne.mock.calls[0][0].$and).toEqual(expect.arrayContaining([{ customerId: CUSTOMER_ID }, { tenantId: TENANT_ID }]))
+    })
+  })
+  test('foreign selected scope does not return an own-scope runtime', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(null))
+    await withSession(async () => {
+      const response = await request.get(route()).query({ customerId: OTHER_CUSTOMER_ID, tenantId: OTHER_TENANT_ID }).set('Authorization', `Bearer ${token}`)
+      expectError(response, 404, 'NOT_FOUND', 'RUNTIME_INSTANCE_NOT_FOUND')
+      expect(RuntimeInstance.findOne.mock.calls[0][0].$and).toEqual(expect.arrayContaining([{ customerId: OTHER_CUSTOMER_ID }, { tenantId: OTHER_TENANT_ID }]))
+    })
+  })
+  test('requires VMF_VIEW independently of update authority', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    Role.find.mockReturnValue(boundedQuery(buildDefaultRoleRows().map(row => ({ ...row, permissions: [] }))))
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectError(response, 403, 'FORBIDDEN')
+      expect(response.body.error.details.permission).toBe('VMF_VIEW')
+    })
+  })
+  test('preserves actual feature-entitlement denial', async () => {
+    Customer.findById = jest.fn(() => boundedQuery(makeCustomer({ entitlements: ['DEALS'] })))
+    Tenant.findById = jest.fn(() => boundedQuery(makeTenant()))
+    Role.find = jest.fn(() => boundedQuery(buildDefaultRoleRows()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectError(response, 403, 'LICENSE_FEATURE_NOT_ENABLED', 'FEATURE_NOT_ENABLED')
+      expect(response.body.error.details.feature).toBe('VMF')
+    })
+  })
+  test.each([
+    ['raw dependency', new Error('private dependency detail'), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_EVIDENCE_LIST_DEPENDENCY_UNAVAILABLE'],
+    ['unknown typed dependency', Object.assign(new Error('private dependency detail'), { status: 503, code: 'SERVICE_UNAVAILABLE', details: { reason: 'UNKNOWN_TYPED_DEPENDENCY' } }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_EVIDENCE_LIST_DEPENDENCY_UNAVAILABLE'],
+    ['recognised timeout', Object.assign(new Error('private timeout detail'), { code: 50 }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_EVIDENCE_LIST_DEADLINE_EXCEEDED'],
+    ['protected frozen material', membershipError('MEMBERSHIP_BYTE_BOUND'), 409, 'RUNTIME_EVIDENCE_MEMBERSHIP_INVALID', 'MEMBERSHIP_BYTE_BOUND'],
+  ])('%s rejects safely through the collection route', async (_label, error, status, code, reason) => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), query = boundedQuery(null)
+    query.lean.mockRejectedValue(error); RuntimeInstance.findOne.mockReturnValue(query)
+    await withSession(async session => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectError(response, status, code, reason)
+      expect(session.endSession).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('post-lock operational capability mounted guards', () => {
+  const route = () => `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence-capability`
+  const scope = { customerId: CUSTOMER_ID, tenantId: TENANT_ID }
+  const boundedQuery = value => {
+    const promise = Promise.resolve(value)
+    return { ...buildLeanQuery(value), lean: jest.fn().mockReturnThis(), setOptions: jest.fn().mockReturnThis(),
+      session: jest.fn().mockReturnThis(), limit: jest.fn().mockReturnThis(), then: promise.then.bind(promise), catch: promise.catch.bind(promise) }
+  }
+  beforeEach(async () => {
+    Customer.findById = jest.fn(() => boundedQuery(makeCustomer()))
+    Tenant.findById = jest.fn(() => boundedQuery(makeTenant()))
+    Role.find = jest.fn(() => boundedQuery(buildDefaultRoleRows()))
+    const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+    Source.findOne = jest.fn(() => boundedQuery(null))
+    RuntimeEvidenceObject.findOne = jest.fn(() => boundedQuery(null))
+  })
+  const withSession = async (work, retry) => {
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    let active = false, retried = false
+    const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: jest.fn(async callback => {
+      while (true) {
+        active = true
+        try { return await callback() }
+        catch (error) { if (!retry || retried) throw error; retried = true; retry(error) }
+        finally { active = false }
+      }
+    }) }
+    const start = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+    try { return await work(session) }
+    finally { start.mockRestore(); if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor); else delete mongoose.connection.readyState }
+  }
+  const expectError = (response, status, code, reason) => {
+    expect({ status: response.status, error: response.body.error }).toMatchObject({ status,
+      error: { code, ...(reason ? { details: { reason } } : {}) } })
+    expect(response.body).not.toHaveProperty('data')
+    expect(JSON.stringify(response.body)).not.toMatch(/private dependency detail|private timeout detail|UNKNOWN_TYPED_DEPENDENCY|stackTrace/)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  }
+  test('requires authentication before reading operational prerequisites', async () => {
+    expectError(await request.get(route()).query(scope), 401, 'UNAUTHENTICATED')
+  })
+  test.each([{ customerId: CUSTOMER_ID }, { ...scope, canExecute: 'true' }])('requires strict selected scope%j before runtime access', async query => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    expectError(await request.get(route()).query(query).set('Authorization', `Bearer ${token}`), 422, 'VALIDATION_FAILED')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+  test('VIEW-only caller receives an unlocked blocked descriptor without UPDATE rights or extra runtime query', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expect(response.status).toBe(200)
+      expect(response.body.data.recording).toMatchObject({ eligibility: 'BLOCKED', blockedBy: ['VMF_UPDATE_REQUIRED', 'LOCK_BASIS_UNAVAILABLE'], binding: null })
+      expect(response.body.data.impact).toEqual({ eligibility: 'ITEM_REQUIRED' })
+      expect(response.body.data.admission).toEqual({ eligibility: 'ITEM_REQUIRED' })
+      expect(RuntimeInstance.findOne).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(response.body)).not.toMatch(/pointerRecorded|__evidenceSnapshotControl|lockedEvidenceSnapshot/)
+    })
+  })
+  test('actual UPDATE-stage typed403 with the wrong reason rejects safely instead of becoming missing authority', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const failure = Object.assign(new Error('private dependency detail'), { status: 403, code: 'FORBIDDEN',
+      details: { permission: 'VMF_UPDATE', reason: 'PRIVATE_PERMISSION_CHECK_FAILURE', internal: 'private dependency detail' } })
+    let sessionChecks = 0
+    const rejectedUpdate = jest.fn()
+    Role.find.mockImplementation(() => {
+      const query = boundedQuery(buildDefaultRoleRows())
+      query.session.mockImplementation(() => {
+        // The same role reader serves VIEW and UPDATE. The first session read
+        // authorises VIEW; the second is the separate actual UPDATE check.
+        if (++sessionChecks === 2) { rejectedUpdate(); throw failure }
+        return query
+      })
+      return query
+    })
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectError(response, 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_OPERATIONAL_CAPABILITY_DEPENDENCY_UNAVAILABLE')
+      expect(JSON.stringify(response.body)).not.toMatch(/PRIVATE_PERMISSION_CHECK_FAILURE|binding|internal/)
+      expect(rejectedUpdate).toHaveBeenCalledTimes(1)
+      expect(sessionChecks).toBe(2)
+      expect(RuntimeInstance.findOne).toHaveBeenCalledTimes(1)
+    })
+  })
+  test('requires VIEW independently of existing UPDATE permission', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    Role.find.mockReturnValue(boundedQuery(buildDefaultRoleRows().map(row => ({ ...row, permissions: ['VMF_UPDATE'] }))))
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expectError(response, 403, 'FORBIDDEN'); expect(response.body.error.details.permission).toBe('VMF_VIEW')
+    })
+  })
+  test('wrong selected customer cannot receive an own-customer descriptor', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(null))
+    await withSession(async () => {
+      const response = await request.get(route()).query({ customerId: OTHER_CUSTOMER_ID, tenantId: OTHER_TENANT_ID }).set('Authorization', `Bearer ${token}`)
+      expectError(response, 404, 'NOT_FOUND', 'RUNTIME_INSTANCE_NOT_FOUND')
+      expect(RuntimeInstance.findOne.mock.calls[0][0].$and).toEqual(expect.arrayContaining([{ customerId: OTHER_CUSTOMER_ID }, { tenantId: OTHER_TENANT_ID }]))
+    })
+  })
+  test('preserves actual missing licence entitlement before descriptor construction', async () => {
+    Customer.findById = jest.fn(() => boundedQuery(makeCustomer({ entitlements: ['DEALS'] })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance()))
+    await withSession(async () => expectError(await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`),
+      403, 'LICENSE_FEATURE_NOT_ENABLED', 'FEATURE_NOT_ENABLED'))
+  })
+  test.each([null, false, 0, ''])('present falsey locked pointer%j retains its exact stale error', async pointer => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance({ status: 'LOCKED',
+      framework_state: { lock: { locked: true } }, lockedEvidenceSnapshot: pointer })))
+    await withSession(async () => {
+      expectError(await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`), 409, 'CONFLICT', 'POST_LOCK_BINDING_STALE')
+      expect(RuntimeInstance.findOne).toHaveBeenCalledTimes(1)
+    })
+  })
+  test('truly absent locked pointer remains a distinct known legacy descriptor', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const raw = makeRuntimeInstance({ status: 'LOCKED', framework_state: { lock: { locked: true } } })
+    delete raw.lockedEvidenceSnapshot
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(raw))
+    await withSession(async () => {
+      const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+      expect(response.status).toBe(200)
+      expect(response.body.data.recording).toMatchObject({ eligibility: 'BLOCKED', blockedBy: ['FROZEN_MEMBERSHIP_NOT_RECORDED'], binding: null })
+    })
+  })
+  test('presence witness stays private while default public runtime DTO remains unchanged', async () => {
+    RuntimeInstance.findOne.mockReturnValue(boundedQuery(makeRuntimeInstance({ lockedEvidenceSnapshot: null })))
+    const scopes = { customer: { _id: CUSTOMER_ID }, tenant: { _id: TENANT_ID, customerId: CUSTOMER_ID },
+      resolvedPermissions: { tenants: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, permissions: ['VMF_VIEW'] }] } }
+    const common = { runtimeInstanceId: RUNTIME_INSTANCE_ID, scopes, maxTimeMS: 2000, metadataMaxTimeMS: 2000 }
+    const publicValue = await getRuntimeInstance(common)
+    expect(JSON.stringify(publicValue)).not.toMatch(/pointerRecorded|__evidenceSnapshotControl|lockedEvidenceSnapshot/)
+    const { EVIDENCE_SNAPSHOT_INTERNAL_READ } = await import('../services/runtimeEvidenceSnapshotContract.js')
+    const privateValue = await getRuntimeInstance({ ...common, internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ })
+    expect(privateValue.__evidenceSnapshotControl.pointerRecorded).toBe(true)
+    expect(privateValue.__evidenceSnapshotControl).not.toHaveProperty('pointer')
+    expect(RuntimeInstance.findOne).toHaveBeenCalledTimes(2)
+  })
+  test.each([
+    [new Error('private dependency detail'), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_OPERATIONAL_CAPABILITY_DEPENDENCY_UNAVAILABLE'],
+    [Object.assign(new Error('private dependency detail'), { status: 503, code: 'SERVICE_UNAVAILABLE', details: { reason: 'UNKNOWN_TYPED_DEPENDENCY' } }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_OPERATIONAL_CAPABILITY_DEPENDENCY_UNAVAILABLE'],
+    [Object.assign(new Error('private timeout detail'), { code: 50 }), 503, 'SERVICE_UNAVAILABLE', 'POST_LOCK_OPERATIONAL_CAPABILITY_DEADLINE_EXCEEDED'],
+    [membershipError('MEMBER_MISSING'), 409, 'RUNTIME_EVIDENCE_MEMBERSHIP_INVALID', 'MEMBER_MISSING'],
+  ])('rejected dependency keeps exact safe mounted error%j', async (error, status, code, reason) => {
+    const token = await getAccessTokenForUser(makeRegularUser()), query = boundedQuery(null)
+    query.lean.mockRejectedValue(error); RuntimeInstance.findOne.mockReturnValue(query)
+    await withSession(async () => expectError(await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`), status, code, reason))
+  })
+  test('raw transient reaches transaction owner and the original deadline survives its callback retry', async () => {
+    const token = await getAccessTokenForUser(makeRegularUser()), base = Date.now()
+    let elapsed = 0
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => base + elapsed)
+    const raw = Object.assign(new Error('private dependency detail'), { hasErrorLabel: label => label === 'TransientTransactionError' })
+    const first = boundedQuery(null), second = boundedQuery(makeRuntimeInstance())
+    first.lean.mockRejectedValue(raw)
+    RuntimeInstance.findOne.mockReturnValueOnce(first).mockReturnValue(second)
+    const retry = jest.fn(error => { expect(error).toBe(raw); elapsed = 5900 })
+    try {
+      await withSession(async () => {
+        const response = await request.get(route()).query(scope).set('Authorization', `Bearer ${token}`)
+        expect(response.status).toBe(200)
+        expect(first.setOptions).toHaveBeenCalledWith({ maxTimeMS: 2000 })
+        expect(second.setOptions).toHaveBeenCalledWith({ maxTimeMS: 100 })
+      }, retry)
+      expect(retry).toHaveBeenCalledTimes(1)
+    } finally { clock.mockRestore() }
+  })
+})
+
+describe('post-lock pending submission mounted guards', () => {
+  const pendingPayload = () => ({ contractVersion: 'post-lock-evidence-submission.v1',
+    requestKey: '123e4567-e89b-42d3-a456-426614174001', binding: {
+      customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, runtimeInstanceKey: 'synthetic-pending',
+      revisionNumber: 1, basisStateVersion: 'rsv2:123e4567-e89b-42d3-a456-426614174000',
+      evidenceSnapshotId: 'evidence_snapshot_123e4567-e89b-42d3-a456-426614174002', membershipHash: 'a'.repeat(64),
+      lockSnapshotId: 'synthetic-lock', lockSnapshotHash: 'b'.repeat(64), packageId: '507f1f77bcf86cd799439011', packageVersion: '1.0',
+      dependencySnapshotId: 'synthetic-dependency', dependencySnapshotHash: 'c'.repeat(64), policyHash: 'd'.repeat(64),
+    }, source: { sourceId: 'synthetic-source', sourceType: 'MANUAL_DOCUMENT', title: 'Synthetic source',
+      locator: { passage: 'Synthetic passage.' }, contentHash: `sha256:${'e'.repeat(64)}`, retrievedAt: '2026-11-06T12:00:00.000Z',
+      currentness: 'UNCONFIRMED', qualifications: [], licensing: { licenceRef: 'synthetic', retentionPermitted: true, retainUntil: null },
+      provenance: { producerKey: 'manual', producerVersion: '1', receiptRef: 'synthetic-receipt', acquiredAt: '2026-11-06T12:00:00.000Z' } },
+    evidence: { title: 'Synthetic evidence', statement: 'Synthetic statement.', sectionKeys: [] }, reason: 'Synthetic impact inspection.',
+  })
+  test('requires authentication before accepting any pending payload', async () => {
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence`).send(pendingPayload())
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('data')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_EVIDENCE_SUBMITTED' }))
+  })
+  test('strict request validation rejects unknown producer fields before runtime access', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), payload = pendingPayload()
+    payload.providerOverride = true
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence`)
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+      .set('Authorization', `Bearer ${token}`).send(payload)
+    expect(response.status).toBe(422)
+    expect(response.body.error.code).toBe('VALIDATION_FAILED')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_EVIDENCE_SUBMITTED' }))
+  })
+  test('a rejected runtime dependency reaches the mounted error contract and never becomes an empty success', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), query = buildLeanQuery(null)
+    query.lean.mockRejectedValue(Object.assign(new Error('Scoped runtime read unavailable.'), {
+      status: 503, code: 'SERVICE_UNAVAILABLE', details: { reason: 'POST_LOCK_STORAGE_UNAVAILABLE' },
+    }))
+    RuntimeInstance.findOne.mockReturnValue(query)
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence`)
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+      .set('Authorization', `Bearer ${token}`).send(pendingPayload())
+    expect(response.status).toBe(503)
+    expect(response.body.error).toMatchObject({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'POST_LOCK_STORAGE_UNAVAILABLE' } })
+    expect(response.body).not.toHaveProperty('data')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_EVIDENCE_SUBMITTED' }))
+  })
+  test.each(['retrievedAt', 'asOfAt', 'acquiredAt', 'retainUntil'])('malformed recording %s is mounted422 with no submission audit call', async field => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), payload = pendingPayload()
+    if (field === 'acquiredAt') payload.source.provenance.acquiredAt = 'not-a-date'
+    else if (field === 'retainUntil') payload.source.licensing.retainUntil = 'not-a-date'
+    else {
+      payload.source[field] = 'not-a-date'
+      if (field === 'asOfAt') payload.source.currentness = 'AS_OF'
+    }
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence`)
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID }).set('Authorization', `Bearer ${token}`).send(payload)
+    expect(response.status).toBe(422)
+    expect(response.body.error.code).toBe('VALIDATION_FAILED')
+    expect(response.body).not.toHaveProperty('data')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_EVIDENCE_SUBMITTED' }))
+  })
+  const impactPayload = () => ({ contractVersion: 'post-lock-impact-decision.v1',
+    requestKey: '123e4567-e89b-42d3-a456-426614174003', expectedBinding: pendingPayload().binding,
+    expectedSubmissionDigest: 'e'.repeat(64), expectedHeadHash: null, disposition: 'CORROBORATIVE',
+    rationale: 'A human conclusion; no automatic admission.', confirm: true })
+  const admissionPayload = () => ({ expectedUpdatedAt: '2026-11-06T12:00:00.000Z', reason: 'Explicit successor.',
+    postLockAdmission: { contractVersion: 'post-lock-successor-admission.v1',
+      requestKey: '123e4567-e89b-42d3-a456-426614174501', submissionId: 'f'.repeat(64),
+      expectedSubmissionDigest: 'e'.repeat(64), expectedBinding: pendingPayload().binding,
+      expectedImpactHeadHash: 'd'.repeat(64), rationale: 'Carry this selected item into a draft for normal review.', confirm: true } })
+  test.each([CUSTOMER_ID, OTHER_CUSTOMER_ID])('admission bounds the runtime lookup to its validated binding %s and preserves dependency failure', async customerId => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), payload = admissionPayload()
+    payload.postLockAdmission.expectedBinding.customerId = customerId
+    const query = buildLeanQuery(null)
+    query.lean.mockRejectedValue(Object.assign(new Error('Synthetic selected-scope read failure'), {
+      status: 503, code: 'SERVICE_UNAVAILABLE', details: { reason: 'TASK07_SELECTED_SCOPE_READ_FAILED' },
+    }))
+    RuntimeInstance.findOne.mockReturnValue(query)
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    const collection = RuntimeInstance.collection
+    RuntimeInstance.collection = { indexes: async () => [{ unique: true,
+      key: { customerId: 1, tenantId: 1, 'revision.parentRuntimeId': 1 },
+      partialFilterExpression: { 'revision.parentRuntimeId': { $type: 'objectId' } } }] }
+    let active = false
+    const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: async work => {
+      active = true
+      try { return await work() } finally { active = false }
+    } }
+    const start = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+    try {
+      const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+        .set('Authorization', `Bearer ${token}`).send(payload)
+      expect(response.status).toBe(503)
+      expect(response.body.error.details.reason).toBe('TASK07_SELECTED_SCOPE_READ_FAILED')
+      expect(RuntimeInstance.findOne).toHaveBeenCalledWith({ $and: [
+        { $or: [{ _id: RUNTIME_INSTANCE_ID }, { runtimeInstanceKey: RUNTIME_INSTANCE_ID }] },
+        { customerId }, { tenantId: TENANT_ID },
+      ] })
+      expect(response.body).not.toHaveProperty('data')
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'RUNTIME_REVISION_CREATED' }))
+    } finally {
+      start.mockRestore(); RuntimeInstance.collection = collection
+      if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+      else delete mongoose.connection.readyState
+    }
+  })
+  test('successor admission requires mounted authentication', async () => {
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`).send(admissionPayload())
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('data')
+  })
+  test.each(['rationale', 'confirm', 'head', 'origin'])('successor admission rejects authored invalid %s before creation', async fault => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), payload = admissionPayload()
+    if (fault === 'rationale') payload.postLockAdmission.rationale = ' '
+    if (fault === 'confirm') payload.postLockAdmission.confirm = false
+    if (fault === 'head') payload.postLockAdmission.expectedImpactHeadHash = null
+    if (fault === 'origin') payload.postLockAdmission.postLockOrigin = {}
+    const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID }).set('Authorization', `Bearer ${token}`).send(payload)
+    expect(response.status).toBe(422)
+    expect(response.body.error.code).toBe('VALIDATION_FAILED')
+    expect(response.body).not.toHaveProperty('data')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'RUNTIME_REVISION_CREATED' }))
+  })
+  test('successor admission refuses disconnected storage rather than using ordinary compensation', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 0 })
+    try {
+      const response = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+        .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID }).set('Authorization', `Bearer ${token}`).send(admissionPayload())
+      expect(response.status).toBe(503)
+      expect(response.body.error.details.reason).toBe('POST_LOCK_ADMISSION_STORAGE_UNAVAILABLE')
+      expect(response.body).not.toHaveProperty('data')
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'RUNTIME_REVISION_CREATED' }))
+    } finally {
+      if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+      else delete mongoose.connection.readyState
+    }
+  })
+  const impactRoute = () => `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/post-lock-evidence/${'f'.repeat(64)}/impact-decisions`
+  test('impact recording requires mounted authentication', async () => {
+    const response = await request.post(impactRoute()).send(impactPayload())
+    expect(response.status).toBe(401)
+    expect(response.body).not.toHaveProperty('data')
+  })
+  test.each(['rationale', 'confirm', 'extra'])('impact %s validation rejects before decision audit', async fault => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), payload = impactPayload()
+    if (fault === 'rationale') payload.rationale = ' '
+    if (fault === 'confirm') payload.confirm = false
+    if (fault === 'extra') payload.reviewerUserId = CUSTOMER_ADMIN_ID
+    const response = await request.post(impactRoute()).query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+      .set('Authorization', `Bearer ${token}`).send(payload)
+    expect(response.status).toBe(422)
+    expect(response.body.error.code).toBe('VALIDATION_FAILED')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_IMPACT_DECISION_RECORDED' }))
+  })
+  test('impact history rejects an invalid page limit', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const response = await request.get(impactRoute()).query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID, limit: 0 })
+      .set('Authorization', `Bearer ${token}`)
+    expect(response.status).toBe(422)
+    expect(response.body).not.toHaveProperty('data')
+  })
+  test('impact history rejected runtime lookup propagates through the actual service and mounted route', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin()), query = buildLeanQuery(null)
+    query.lean.mockRejectedValue(new Error('Synthetic impact runtime lookup failure'))
+    RuntimeInstance.findOne.mockReturnValue(query)
+    const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    let active = false
+    const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: jest.fn(async work => {
+      active = true
+      try { return await work() } finally { active = false }
+    }) }
+    const start = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+    try {
+      const response = await request.get(impactRoute()).query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+        .set('Authorization', `Bearer ${token}`)
+      expect(response.status).toBe(503)
+      expect(response.body.error).toMatchObject({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'POST_LOCK_IMPACT_READ_UNAVAILABLE' } })
+      expect(response.body).not.toHaveProperty('data')
+      expect(session.withTransaction).toHaveBeenCalledTimes(1)
+      expect(session.endSession).toHaveBeenCalledTimes(1)
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'POST_LOCK_IMPACT_DECISION_RECORDED' }))
+    } finally {
+      start.mockRestore()
+      if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+      else delete mongoose.connection.readyState
+    }
+  })
+})
+
 describe('inherited review mounted security without listeners', () => {
   const parentId = 'a27f1f77bcf86cd799439190'
   const rootId = 'a27f1f77bcf86cd799439191'

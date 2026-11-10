@@ -230,11 +230,16 @@ const versionFields = {
   },
 }
 
-export const createRuntimeStateSchema = ({ collection, fields, indexes }) => {
+export const createRuntimeStateSchema = ({ collection, fields, indexes, validatePostLockAssociation }) => {
   const schema = new mongoose.Schema(
     {
       ...scopedIdentityFields,
       ...versionFields,
+      ...(validatePostLockAssociation ? { migrationReceiptId: {
+        ...versionFields.migrationReceiptId,
+        required: function () { return !validatePostLockAssociation(this) },
+        validate: function (value) { return this.postLockAssociation === undefined || value == null },
+      } } : {}),
       ...fields,
     },
     {

@@ -27,10 +27,25 @@ const assertLockAudit = ({ audit, body, pointer, actorUserId, auditId, signature
 const collection = name => mongoose.connection.db.collection(name)
 const queryOptions = ({ session, readBudget } = {}) => ({ ...(session ? { session } : {}), maxTimeMS: 2000, ...(readBudget ? readBudget() : {}) })
 const scoped = scope => ({ customerId: new mongoose.Types.ObjectId(scope.customerId), tenantId: new mongoose.Types.ObjectId(scope.tenantId), runtimeInstanceId: new mongoose.Types.ObjectId(scope.runtimeInstanceId), runtimeInstanceKey: scope.runtimeInstanceKey })
-const readRows = async (kind, filter, options, deps) => {
-  const rows = await (deps.readRows ? deps.readRows(kind, filter, options) : collection(families[kind][0]).find(filter, queryOptions(options))
-    .sort({ [families[kind][1]]: 1, _id: 1 }).limit(EVIDENCE_MEMBER_LIMITS[kind] + 1).toArray())
+const readRows = async (kind, filter, options, deps, preparing = false) => {
+  const limit = EVIDENCE_MEMBER_LIMITS[kind]
+  let rows, expectedCount
+  if (deps.readRows) rows = await deps.readRows(kind, filter, options)
+  else {
+    const selected = collection(families[kind][0])
+    if (preparing) {
+      expectedCount = await selected.countDocuments(filter, { ...queryOptions(options), limit: limit + 1 })
+      requireValue(Number.isSafeInteger(expectedCount) && expectedCount >= 0 && expectedCount <= limit, 'MEMBER_BOUND')
+    }
+    // Timed transactions own CSOT. Close this ordinary cursor in its first
+    // response so inherited CSOT cannot add an invalid getMore maxTimeMS.
+    rows = await selected.find(filter, { ...queryOptions(options), singleBatch: true, batchSize: limit + 1 })
+      .sort({ [families[kind][1]]: 1, _id: 1 }).limit(limit + 1).toArray()
+  }
   requireValue(Array.isArray(rows) && rows.length <= EVIDENCE_MEMBER_LIMITS[kind], 'MEMBER_BOUND')
+  // A single response may stop at MongoDB's byte cap. Never freeze that partial
+  // set. Verification separately requires every recorded storage ID below.
+  if (expectedCount !== undefined) requireValue(rows.length === expectedCount, 'MEMBER_BOUND')
   return rows
 }
 const verifySectionHistory = async (rows, { session, readBudget }, deps) => {
@@ -52,7 +67,7 @@ export const prepareRuntimeEvidenceSnapshot = async ({ runtime, session, snapsho
   requireValue(runtime.status === 'LOCKED' && runtime.framework_state?.lock?.locked === true, 'LOCK_INVALID')
   const scope = evidenceSnapshotScope(runtime)
   const rows = {}
-  for (const kind of Object.keys(families)) rows[kind] = await readRows(kind, { ...scoped(scope), current: true, stateVersion: runtime.stateVersion }, { session }, deps)
+  for (const kind of Object.keys(families)) rows[kind] = await readRows(kind, { ...scoped(scope), current: true, stateVersion: runtime.stateVersion }, { session }, deps, true)
   await verifySectionHistory(rows.sections, { session }, deps)
   const body = buildEvidenceMembershipBody({ runtime, lockTruthRecord: runtime.framework_state.lock.snapshot, ...rows })
   const pointer = { contractVersion: EVIDENCE_MEMBERSHIP_VERSION, snapshotId, membershipHash: membershipHash(body),

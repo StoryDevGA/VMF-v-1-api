@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { projectPostLockOrigin, assertPostLockOriginPairs } from './postLockSuccessorAdmissionContract.js'
 import { lookup } from 'node:dns/promises'
 import { createRequire } from 'node:module'
 import { isIP } from 'node:net'
@@ -2539,6 +2540,7 @@ const buildSourceRegistryEntryFromLineage = ({
     evidenceObject.sourceId === sourceId,
   )
   const firstEvidenceObject = sourceEvidenceObjects[0] || {}
+  const postLock = projectPostLockOrigin(source, 'source')
 
   return {
     sourceId,
@@ -2582,6 +2584,9 @@ const buildSourceRegistryEntryFromLineage = ({
     ...(Number.isFinite(Number(source.pendingEvidenceObjects))
       ? { pendingEvidenceObjects: Number(source.pendingEvidenceObjects) }
       : {}),
+    ...postLock,
+    ...(postLock.postLockOrigin ? { title: source.title ?? source.label, contentHash: source.contentHash,
+      sourceRef: source.sourceRef ?? source.url ?? '', lineageRef: source.lineageRef } : {}),
   }
 }
 
@@ -2653,10 +2658,13 @@ export const normalizeDiscoveryEvidenceObjects = ({
     .map((evidenceObject) => {
       const evidenceObjectId = String(evidenceObject?.evidenceObjectId || '').trim()
       const sourceId = String(evidenceObject?.sourceId || '').trim()
-      const extractedFact = sanitizeFact(evidenceObject?.extractedFact)
+      const postLock = projectPostLockOrigin(evidenceObject, 'evidence')
+      // Origin-bound statements retain their exact material, including internal whitespace.
+      const extractedFact = postLock.postLockOrigin ? evidenceObject.extractedFact : sanitizeFact(evidenceObject?.extractedFact)
       if (!evidenceObjectId || !sourceId || !extractedFact) return null
 
-      const reviewStatus = normalizeReviewStatus(evidenceObject.reviewStatus)
+      const reviewStatus = normalizeReviewStatus(postLock.postLockOrigin && evidenceObject.reviewStatus === 'PENDING_REVIEW'
+        ? 'PENDING' : evidenceObject.reviewStatus)
       const acquisitionMethod = evidenceObject.acquisitionMethod || 'CUSTOMER_PROVIDED_INPUT'
       if (
         acquisitionMethod === 'WEBSITE_ACQUISITION'
@@ -2669,6 +2677,9 @@ export const normalizeDiscoveryEvidenceObjects = ({
         evidenceObjectId,
         sourceId,
         ...projectControlledReplayProvenance(evidenceObject),
+        ...postLock,
+        ...(postLock.postLockOrigin ? { title: evidenceObject.title, sourceType: evidenceObject.sourceType,
+          sourceLocation: { ...evidenceObject.sourceLocation }, acceptanceState: evidenceObject.acceptanceState } : {}),
         category: evidenceObject.category || DISCOVERY_EVIDENCE_CATEGORIES.COMPANY,
         coverageArea: evidenceObject.coverageArea || evidenceObject.category || 'Company',
         extractedFact,
@@ -2719,8 +2730,11 @@ export const normalizeDiscoveryEvidenceObjects = ({
   assertSourceEvidenceMetadataPairs({ sources: Array.isArray(sources) ? sources : [], evidenceObjects: normalizedObjects })
   assertControlledReplayProvenancePairs({ sources: Array.isArray(sourceRegistry) ? sourceRegistry : Array.isArray(sources) ? sources : [],
     evidenceObjects: normalizedObjects })
+  assertPostLockOriginPairs({ sources: Array.isArray(sourceRegistry) ? sourceRegistry : Array.isArray(sources) ? sources : [],
+    evidenceObjects: normalizedObjects })
   if (Array.isArray(sourceRegistry) && Array.isArray(sources)) {
     assertControlledReplayProvenancePairs({ sources, evidenceObjects: normalizedObjects })
+    assertPostLockOriginPairs({ sources, evidenceObjects: normalizedObjects })
     assertControlledReplayProvenancePairs({ sources: sourceRegistry, evidenceObjects: sources })
   }
   return normalizedObjects
@@ -2772,6 +2786,7 @@ export const buildDiscoverySourceRegistry = ({
   })
 
   const normalizedRegistry = registry.map((source) => {
+    const postLock = projectPostLockOrigin(source, 'source')
     const sourceId = String(source?.sourceId || '').trim()
     const sourceEvidenceObjects = evidenceObjects.filter((evidenceObject) =>
       evidenceObject?.sourceId === sourceId,
@@ -2783,6 +2798,7 @@ export const buildDiscoverySourceRegistry = ({
       sourceId,
       sourceType: String(source?.sourceType || source?.type || 'DISCOVERY_NOTES').trim(),
       ...projectControlledReplayProvenance(source),
+      ...postLock,
       label: String(source?.label || sourceId || '').trim(),
       status: String(source?.status || 'AVAILABLE').trim().toUpperCase(),
       dateAdded: String(source?.dateAdded || source?.capturedAt || capturedAt || '').trim(),
@@ -2830,6 +2846,7 @@ export const buildDiscoverySourceRegistry = ({
     }
   }).filter((source) => source.sourceId)
   assertSourceEvidenceMetadataPairs({ sources: normalizedRegistry, evidenceObjects })
+  assertPostLockOriginPairs({ sources: normalizedRegistry, evidenceObjects })
   return normalizedRegistry
 }
 

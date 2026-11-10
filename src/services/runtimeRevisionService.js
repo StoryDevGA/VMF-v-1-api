@@ -19,6 +19,12 @@ import {
   requireCanonicalRuntimeStateVersion,
 } from './runtimeStateVersionService.js'
 import { stageRuntimeStateRevisionProvisioning } from './runtimeStateRevisionProvisioningService.js'
+import AuditLog from '../models/AuditLog.js'
+import { withPostLockEvidenceTransaction } from './postLockEvidenceIntakeService.js'
+import { postLockAdmissionError, parsePostLockAdmissionRequest, postLockAdmissionId } from './postLockSuccessorAdmissionContract.js'
+import { assertPostLockRevisionIndexes, readPostLockRevisionAdmissionContext, requirePostLockRevisionAdmissionPolicy,
+  stagePostLockSuccessorCandidates, createPostLockAdmissionReceipt, fencePostLockAdmission,
+  verifyPostLockAdmissionReadback, readPostLockAdmissionReplay } from './postLockSuccessorAdmissionService.js'
 import {
   RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
   buildRuntimeIntelligenceGraphForFrameworkState,
@@ -386,10 +392,12 @@ const logRuntimeRevisionCreated = async ({
   sourceRuntimeInstance,
   revisionRuntimeInstance,
   session = null,
+  admissionReceipt = null,
 }) => {
   const source = serializeRuntimeInstance(sourceRuntimeInstance)
   const revision = serializeRuntimeInstance(revisionRuntimeInstance)
   const auditPayload = {
+    ...(admissionReceipt ? { _id: new mongoose.Types.ObjectId(admissionReceipt.auditId) } : {}),
     action: auditService.AUDIT_ACTIONS.RUNTIME_REVISION_CREATED,
     resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
     resourceId: revisionRuntimeInstance._id,
@@ -401,6 +409,7 @@ const logRuntimeRevisionCreated = async ({
       sourceRuntimeInstanceId: source.id,
     },
     diff: {
+      ...(admissionReceipt ? { postLockAdmission: admissionReceipt } : {}),
       revision: revision.revision,
       sourceRuntimeInstance: {
         id: source.id,
@@ -432,12 +441,15 @@ const logRuntimeRevisionCreated = async ({
 
   try {
     if (auditRequest) {
-      await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
-      return
+      return await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
     }
 
-    await auditService.log(auditPayload, auditOptions)
+    return await auditService.log(auditPayload, auditOptions)
   } catch (err) {
+    if (admissionReceipt) {
+      if (err.hasErrorLabel?.('TransientTransactionError')) throw err
+      throw postLockAdmissionError('POST_LOCK_ADMISSION_AUDIT_WRITE_FAILED', 503)
+    }
     throw buildRevisionError({
       status: 500,
       code: 'RUNTIME_REVISION_AUDIT_FAILED',
@@ -542,6 +554,9 @@ export const createRuntimeRevision = async ({
   runtimeInstanceId,
   payload,
 } = {}) => {
+  if (Object.hasOwn(payload || {}, 'postLockAdmission')) return createAdmittedRuntimeRevision({
+    actorUserId, auditRequest, scopes, runtimeInstanceId, payload,
+  })
   const sourceRuntimeInstance = await resolveQueryValue(RuntimeInstance.findOne(buildRuntimeLookupFilter(runtimeInstanceId)))
 
   if (!sourceRuntimeInstance) {
@@ -595,6 +610,62 @@ export const createRuntimeRevision = async ({
     sourceRuntimeInstance,
     revisionRuntimeInstance,
   })
+}
+
+// The ordinary revision owner keeps transaction and child creation authority.
+// Admission helpers only verify, stage and read back its selected material.
+const createAdmittedRuntimeRevision = async args => {
+  const request = parsePostLockAdmissionRequest(args.payload.postLockAdmission)
+  await assertPostLockRevisionIndexes()
+  const response = (runtimeInstance, receipt, replayed) => ({ runtimeInstance: serializeRuntimeInstance(runtimeInstance),
+    admission: { contractVersion: request.contractVersion, admissionId: receipt.admissionId, replayed } })
+  try {
+    return await withPostLockEvidenceTransaction(async session => {
+      const ctx = await readPostLockRevisionAdmissionContext(args, session)
+      const replay = await readPostLockAdmissionReplay(ctx, session)
+      if (replay) return response(replay.child, replay.receipt, true)
+      assertExpectedUpdatedAt({ runtimeInstance: ctx.sourceRuntimeInstance, expectedUpdatedAt: args.payload.expectedUpdatedAt })
+      assertSourceCanCreateRevision(ctx.sourceRuntimeInstance)
+      const frameworkPackage = await requirePostLockRevisionAdmissionPolicy(ctx, session)
+      const child = buildRevisionRuntimeInstance({ actorUserId: args.actorUserId, frameworkPackage,
+        reason: String(args.payload.reason || '').trim(), sourceRuntimeInstance: ctx.sourceRuntimeInstance, now: new Date() })
+      const auditId = new mongoose.Types.ObjectId(), auditSignatureVersion = new AuditLog().signatureVersion
+      const plan = stagePostLockSuccessorCandidates({ ctx, child, auditId, auditSignatureVersion, admittedAt: new Date().toISOString() })
+      child.framework_state.intelligence_graph = buildRuntimeIntelligenceGraphForFrameworkState({ actorUserId: args.actorUserId,
+        buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EXPLICIT_REBUILD, builtAt: new Date().toISOString(),
+        frameworkPackage, frameworkState: child.framework_state, runtimeInstance: child })
+      child.markModified('framework_state.intelligence_graph')
+      await stageRuntimeStateRevisionProvisioning({ sourceRuntimeInstance: ctx.sourceRuntimeInstance, revisionRuntimeInstance: child, session })
+      const receipt = await createPostLockAdmissionReceipt({ args, ctx, child, plan, session })
+      child.revision.postLockAdmission = receipt
+      await saveRevisionRuntimeInstance({ runtimeInstance: child, session })
+      await fencePostLockAdmission(ctx, receipt, session)
+      const audit = await logRuntimeRevisionCreated({ actorUserId: args.actorUserId, auditRequest: args.auditRequest,
+        sourceRuntimeInstance: ctx.sourceRuntimeInstance, revisionRuntimeInstance: child, session, admissionReceipt: receipt })
+      if (String(audit?._id) !== receipt.auditId || audit?.signatureVersion !== receipt.auditSignatureVersion || audit?.verifySignature?.() !== true) {
+        throw postLockAdmissionError('POST_LOCK_ADMISSION_AUDIT_WRITE_FAILED', 503)
+      }
+      const saved = await verifyPostLockAdmissionReadback({ ctx, child, receipt, session, fresh: true })
+      return response(saved, receipt, false)
+    })
+  } catch (error) {
+    if (error.hasErrorLabel?.('UnknownTransactionCommitResult')) {
+      const uncertain = postLockAdmissionError('POST_LOCK_ADMISSION_SUBMISSION_UNCONFIRMED', 503)
+      uncertain.details.admissionId = postLockAdmissionId(request)
+      throw uncertain
+    }
+    if (error.code === 11000 || error.details?.reason === RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_REVISION_BRANCH_UNSUPPORTED) {
+      // Only after the failed transaction ends: verify a committed exact winner.
+      return withPostLockEvidenceTransaction(async session => {
+        const ctx = await readPostLockRevisionAdmissionContext(args, session)
+        const replay = await readPostLockAdmissionReplay(ctx, session)
+        if (!replay) throw postLockAdmissionError('POST_LOCK_ADMISSION_CHILD_EXISTS', 409)
+        return response(replay.child, replay.receipt, true)
+      })
+    }
+    if (!error.status || !error.code) throw postLockAdmissionError('POST_LOCK_ADMISSION_STORAGE_UNAVAILABLE', 503)
+    throw error
+  }
 }
 
 export default {

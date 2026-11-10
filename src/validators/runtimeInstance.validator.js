@@ -1,5 +1,8 @@
 import { isIP } from 'node:net'
 import { z } from 'zod'
+import { postLockSubmissionSchema } from '../services/postLockEvidenceIntakeContract.js'
+import { postLockImpactRequestSchema, postLockImpactHistoryQuerySchema } from '../services/postLockImpactDecisionContract.js'
+import { postLockAdmissionRequestSchema } from '../services/postLockSuccessorAdmissionContract.js'
 import { sourceVerificationFactsSchema } from '../services/sourceVerificationContext.js'
 import { acquisitionRequestKeySchema } from './acquisitionRun.validator.js'
 import { controlledReplaySelectorSchema } from '../services/controlledReplayContract.js'
@@ -18,6 +21,24 @@ import {
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 import { evidenceDraftQualificationRequestSchema } from '../services/evidenceDraftQualification.js'
+import { parsePostLockEvidenceListQuery, isPostLockEvidenceListError } from '../services/postLockEvidenceListContract.js'
+
+export const validatePostLockEvidenceSubmission = createBodyValidator(postLockSubmissionSchema)
+export const validatePostLockImpactDecision = createBodyValidator(postLockImpactRequestSchema)
+export const validatePostLockImpactHistoryQuery = createQueryValidator(postLockImpactHistoryQuerySchema)
+export const validatePostLockSubmissionParams = createParamsValidator(z.object({
+  runtimeInstanceId: z.string().min(1).max(240), submissionId: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict())
+export const validatePostLockEvidenceListQuery = (req, res, next) => {
+  try {
+    req.query = parsePostLockEvidenceListQuery(req.query)
+    return next()
+  } catch (error) {
+    if (!isPostLockEvidenceListError(error) || error.status !== 422) return next(error)
+    return res.status(422).json({ error: { code: error.code, message: error.message,
+      details: error.details, requestId: req.requestId } })
+  }
+}
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 const DOCUMENT_MAX_FILE_BYTES = 2_500_000
@@ -250,6 +271,7 @@ export const validateEvidenceDraftQualification = createBodyValidator(evidenceDr
 
 const createRuntimeRevisionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+  postLockAdmission: postLockAdmissionRequestSchema.optional(),
   reason: z
     .string()
     .trim()

@@ -38,7 +38,7 @@ const executeFind = async (model, filter, { session, limit, maxTimeMS = 2000 }) 
 
 const buildLegacyInput = (runtimeInstance) => {
   const root = typeof runtimeInstance?.toObject === 'function'
-    ? runtimeInstance.toObject({ depopulate: true, virtuals: false })
+    ? runtimeInstance.toObject({ depopulate: true, virtuals: false, minimize: false })
     : { ...runtimeInstance }
   let rawBsonBytes
   try {

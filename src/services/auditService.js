@@ -93,6 +93,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_REVISION_CREATED: 'RUNTIME_REVISION_CREATED',
   RUNTIME_ACTION_EXECUTED: 'RUNTIME_ACTION_EXECUTED',
   RUNTIME_ACQUISITION_RECORDED: 'RUNTIME_ACQUISITION_RECORDED',
+  POST_LOCK_EVIDENCE_SUBMITTED: 'POST_LOCK_EVIDENCE_SUBMITTED',
+  POST_LOCK_IMPACT_DECISION_RECORDED: 'POST_LOCK_IMPACT_DECISION_RECORDED',
   RUNTIME_STATE_MUTATED: 'RUNTIME_STATE_MUTATED',
   TRUTH_QUALITY_EVALUATED: 'TRUTH_QUALITY_EVALUATED',
   OUTPUT_REQUEST_CREATED: 'OUTPUT_REQUEST_CREATED',
@@ -548,6 +550,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} executed runtime action for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_ACQUISITION_RECORDED:
       return clampSummary(`${actorLabel} recorded acquisition execution for ${targetLabel}`)
+    case AUDIT_ACTIONS.POST_LOCK_EVIDENCE_SUBMITTED:
+      return clampSummary(`${actorLabel} submitted pending post-lock evidence for ${targetLabel}`)
+    case AUDIT_ACTIONS.POST_LOCK_IMPACT_DECISION_RECORDED:
+      return clampSummary(`${actorLabel} recorded a post-lock impact decision for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_STATE_MUTATED:
       return clampSummary(`${actorLabel} updated runtime state for ${targetLabel}`)
     case AUDIT_ACTIONS.TRUTH_QUALITY_EVALUATED:
