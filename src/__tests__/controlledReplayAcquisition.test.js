@@ -83,11 +83,12 @@ beforeEach(() => {
 afterEach(() => { jest.restoreAllMocks(); delete globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ })
 
 describe('inactive controlled acquisition with synthetic imported-owner witnesses', () => {
-  test('shipped catalog stays empty/frozen and native authority and exclusions remain unavailable even in tests', () => {
-    expect(shippedCatalog.CONTROLLED_REPLAY_BINDINGS).toEqual([])
+  test('the frozen local allowlist cannot grant authority without exact native storage and records', async () => {
+    expect(shippedCatalog.CONTROLLED_REPLAY_BINDINGS).toHaveLength(1)
     expect(Object.isFrozen(shippedCatalog.CONTROLLED_REPLAY_BINDINGS)).toBe(true)
-    expect(() => shippedCatalog.verifyControlledReplayAuthority()).toThrow(expect.objectContaining({ details: { reason: 'CONTROLLED_REPLAY_AUTHORITY_UNVERIFIED' } }))
-    expect(() => shippedCatalog.verifyControlledReplayExclusions()).toThrow(expect.objectContaining({ details: { reason: 'CONTROLLED_REPLAY_PROTECTED_SCOPE_UNVERIFIED' } }))
+    expect(Object.isFrozen(shippedCatalog.CONTROLLED_REPLAY_BINDINGS[0].binding.scope)).toBe(true)
+    await expect(shippedCatalog.verifyControlledReplayAuthority()).rejects.toMatchObject({ details: { reason: 'CONTROLLED_REPLAY_AUTHORITY_UNVERIFIED' } })
+    await expect(shippedCatalog.verifyControlledReplayExclusions()).rejects.toMatchObject({ details: { reason: 'CONTROLLED_REPLAY_PROTECTED_SCOPE_UNVERIFIED' } })
   })
   test('empty catalog and unavailable owners reject before any fixed asset or admission work', async () => {
     catalog.length = 0

@@ -440,6 +440,21 @@ const runtimeInstanceSchema = new mongoose.Schema(
       maxlength: 1000,
       default: '',
     },
+    researchConfiguration: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+      select: false,
+      validate: {
+        validator(value) {
+          if (value === undefined) return true
+          try {
+            validateStoredResearchConfiguration(value, typeof this.getFilter === 'function' ? this.getFilter() : this)
+            return true
+          } catch { return false }
+        },
+        message: 'Research configuration must bind its exact revision and save receipt.',
+      },
+    },
     framework_state: {
       type: frameworkStateSchema,
       default: () => ({}),
@@ -556,3 +571,4 @@ const RuntimeInstance = mongoose.model('RuntimeInstance', runtimeInstanceSchema)
 
 export default RuntimeInstance
 import { createControlledReplayIsolationSchema, validateControlledReplayIsolation } from '../services/controlledReplayIsolationService.js'
+import { validateStoredResearchConfiguration } from '../services/researchConfigurationContract.js'

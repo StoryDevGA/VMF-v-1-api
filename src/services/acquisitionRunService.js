@@ -1,7 +1,8 @@
+import { validateStoredResearchConfiguration, validateResearchRunConfiguration, researchConfigurationReference } from './researchConfigurationContract.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { assertControlledReplayNotActivated, validateStoredControlledReplayProvenance,
   assertControlledReplayProvenancePairs, validateControlledReplayRunIdentity } from './controlledReplayContract.js'
-import { assertResolvedControlledReplay, assertControlledReplayCurrent } from './controlledReplayAcquisitionService.js'
+import { assertResolvedControlledReplay, assertControlledReplayCurrent, verifyControlledReplayCurrentAuthority } from './controlledReplayAcquisitionService.js'
 import { assertSourceEvidenceMetadataPairs, validateSourceCapture } from './sourceEvidenceContract.js'
 import mongoose from 'mongoose'
 import env from '../config/env.js'
@@ -45,7 +46,10 @@ export const acquisitionRequestFingerprint = ({ payload = {}, actionKey, actorUs
     const context = assertResolvedControlledReplay(controlledContext)
     return snapshotHash({ contractVersion: CONTROLLED_ACQUISITION_RUN_VERSION, actionKey, actorUserId: String(actorUserId),
       expectedUpdatedAt: payload.expectedUpdatedAt, acquisitionProfile: payload.acquisitionProfile || 'STANDARD',
-      descriptor: context.descriptor, native: context.native })
+      descriptor: context.descriptor, native: context.native,
+      ...(payload.predecessorRunId ? { researchRetry: { predecessorRunId: payload.predecessorRunId,
+        predecessorExecutionAttemptId: payload.predecessorExecutionAttemptId } } : {}),
+      ...(payload.researchConfiguration ? { researchConfiguration: payload.researchConfiguration } : {}) })
   }
   assertControlledReplayNotActivated(payload)
   return snapshotHash({
@@ -59,21 +63,30 @@ export const acquisitionRequestFingerprint = ({ payload = {}, actionKey, actorUs
   })
 }
 
+const cancellationDescriptor = (row, eligible = false) => ({ eligible, executionAttemptId: row.executionAttemptId,
+  ...(row.status === 'CANCELLED' ? { stage: row.startedAt ? 'RUNNING' : 'QUEUED', workerStopConfirmed: false } : {}) })
+const cancellationEligible = (row, runtime, actorUserId) => Boolean(row.researchConfiguration && row.active
+  && ['QUEUED', 'RUNNING'].includes(row.status) && String(row.actorUserId) === String(actorUserId)
+  && runtime.status === 'ACTIVE' && !isRuntimeLocked({ runtimeInstance: runtime }) && !isRuntimeLifecycleTruthImmutable(runtime.framework_state)
+  && row.basisStateVersion === runtime.stateVersion && new Date(row.basisUpdatedAt).getTime() === new Date(runtime.updatedAt).getTime())
 export const publicAcquisitionRun = (row, options = {}) => ({
-  contractVersion: row.contractVersion, runId: row.runId, requestKey: row.requestKey,
+  contractVersion: row.contractVersion, runId: row.runId, requestKey: row.requestKey, executionAttemptId: row.executionAttemptId,
   scope: { customerId: String(row.customerId), tenantId: String(row.tenantId), runtimeInstanceId: String(row.runtimeInstanceId),
     runtimeInstanceKey: row.runtimeInstanceKey, rootRuntimeInstanceKey: row.rootRuntimeInstanceKey },
   actorUserId: String(row.actorUserId), authority: row.authority, actionKey: row.actionKey, acquisitionProfile: row.acquisitionProfile,
   basisStateVersion: row.basisStateVersion, basisUpdatedAt: row.basisUpdatedAt,
   ...(row.contractVersion === CONTROLLED_ACQUISITION_RUN_VERSION
     ? { controlledReplayProvenance: validateControlledReplayRunIdentity(row) } : {}),
+  ...(row.researchConfiguration !== undefined ? { researchConfiguration: validateResearchRunConfiguration(row) } : {}),
+  ...(row.researchConfiguration ? { cancellation: cancellationDescriptor(row) } : {}),
   status: row.status, createdAt: row.createdAt, startedAt: row.startedAt, completedAt: row.completedAt,
   ...(row.predecessorRunId ? { predecessorRunId: row.predecessorRunId } : {}),
+  ...(row.predecessorExecutionAttemptId ? { predecessorExecutionAttemptId: row.predecessorExecutionAttemptId } : {}),
   ...(terminal(row) ? { canonicalSaved: row.canonicalSaved, outputStateVersion: row.outputStateVersion,
     outcomes: row.outcomes.map(({ kind, inputIndex, status, sourceId, evidenceObjectCount, reason }) =>
       ({ kind, inputIndex, status, ...(sourceId ? { sourceId } : {}), evidenceObjectCount, ...(reason ? { reason } : {}) })),
     ...(row.reason ? { reason: row.reason } : {}),
-    audit: { admissionId: String(row.admissionAuditId), startId: String(row.startAuditId), terminalId: String(row.terminalAuditId),
+    audit: { admissionId: String(row.admissionAuditId), ...(row.startAuditId ? { startId: String(row.startAuditId) } : {}), terminalId: String(row.terminalAuditId),
       ...(row.saveAuditId ? { saveId: String(row.saveAuditId) } : {}) },
   } : { recovery: 'Execution outcome is unconfirmed. Refresh and inspect this Run; do not start another acquisition.' }),
   ...(row.reason ? { reason: row.reason } : {}), ...options,
@@ -92,15 +105,21 @@ const requireIndexes = async deadline => {
   }
 }
 const recordedAudit = async ({ context, phase, session, extra = {} }) => {
+  const controlledDescriptor = context.controlledContext ? assertResolvedControlledReplay(context.controlledContext).descriptor
+    : context.row?.contractVersion === CONTROLLED_ACQUISITION_RUN_VERSION ? validateControlledReplayRunIdentity(context.row) : undefined
   const audit = await auditService.log({ actorUserId: context.actorUserId,
     action: auditService.AUDIT_ACTIONS.RUNTIME_ACQUISITION_RECORDED, resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
     resourceId: context.scope.runtimeInstanceId, requestId: context.auditRequest?.requestId,
     scope: { ...context.scope, runtimeInstanceKey: context.runtime.runtimeInstanceKey },
     diff: { runId: context.runId, executionAttemptId: context.executionAttemptId, phase,
       requestFingerprint: context.requestFingerprint,
-      ...(context.controlledContext ? { controlledRun: { contractVersion: CONTROLLED_ACQUISITION_RUN_VERSION,
+      ...(context.payload?.predecessorExecutionAttemptId || context.row?.predecessorExecutionAttemptId ? { researchRetry: {
+        predecessorRunId: context.payload?.predecessorRunId || context.row.predecessorRunId,
+        predecessorExecutionAttemptId: context.payload?.predecessorExecutionAttemptId || context.row.predecessorExecutionAttemptId } } : {}),
+      ...(context.researchConfiguration ? { researchConfiguration: researchConfigurationReference(context.researchConfiguration) } : {}),
+      ...(controlledDescriptor ? { controlledRun: { contractVersion: CONTROLLED_ACQUISITION_RUN_VERSION,
         plannerVersion: CONTROLLED_ACQUISITION_PLANNER_VERSION,
-        descriptorHash: snapshotHash(assertResolvedControlledReplay(context.controlledContext).descriptor) } } : {}), ...extra },
+        descriptorHash: snapshotHash(controlledDescriptor) } } : {}), ...extra },
   }, { session, throwOnError: true })
   if (!audit?._id || !audit.signature || !audit.signatureVersion)
     fail('ACQUISITION_AUDIT_UNAVAILABLE', 'Acquisition execution audit could not be verified.', 503, context.runId)
@@ -152,10 +171,22 @@ const verifiedAudit = async (row, auditId, phase, deadline, session = null) => {
       plannerVersion: row.plannerVersion, descriptorHash: snapshotHash(validateStoredControlledReplayProvenance(row.controlledReplayProvenance)) }))
     )
     fail('ACQUISITION_RECEIPT_UNVERIFIED', 'Controlled execution audit binding changed.', 503, row.runId)
+  if (row.researchConfiguration !== undefined || audit.diff.researchConfiguration !== undefined) {
+    const record = validateResearchRunConfiguration(row)
+    if (snapshotHash(researchConfigurationReference(record) || null) !== snapshotHash(audit.diff.researchConfiguration || null))
+      fail('ACQUISITION_RECEIPT_UNVERIFIED', 'Research configuration audit binding changed.', 503, row.runId)
+  }
+  const lineage = row.predecessorExecutionAttemptId ? { predecessorRunId: row.predecessorRunId, predecessorExecutionAttemptId: row.predecessorExecutionAttemptId } : null
+  if (snapshotHash(lineage) !== snapshotHash(audit.diff.researchRetry || null))
+    fail('ACQUISITION_RECEIPT_UNVERIFIED', 'Research retry lineage changed.', 503, row.runId)
   return audit
 }
 const verifyTerminal = async (row, deadline, session = null) => {
   const audit = await verifiedAudit(row, row.terminalAuditId, row.status, deadline, session)
+  if (row.status === 'CANCELLED') {
+    await verifiedAudit(row, row.admissionAuditId, 'QUEUED', deadline, session)
+    if (row.startedAt) await verifiedAudit(row, row.startAuditId, 'RUNNING', deadline, session)
+  }
   if (row.reason === STOPPED_WORKER_RECOVERY_REASON) {
     const admission = await verifiedAudit(row, row.admissionAuditId, 'QUEUED', deadline, session)
     const start = await verifiedAudit(row, row.startAuditId, 'RUNNING', deadline, session)
@@ -205,7 +236,26 @@ export const lookupAcquisitionRequest = async ({ runtimeInstance, payload = {}, 
   }
   return context
 }
+const assertResearchRunActive = async (context, session = null) => {
+  if (!context?.researchConfiguration) return
+  const row = await RuntimeAcquisitionRun.collection.findOne({ ...identity(context), status: 'RUNNING', active: true }, { session, maxTimeMS: 2000 })
+  if (!row) fail('ACQUISITION_RUN_NOT_ACTIVE', 'This Run no longer owns an evidence save. Read its receipt.', 409, context.runId)
+}
+export const assertAcquisitionResearchConfigurationCurrent = async (context, session, requireRunning = false) => {
+  if (requireRunning && context?.controlledContext) await verifyControlledReplayCurrentAuthority(context.controlledContext, context.runtime, session)
+  if (!context?.researchConfiguration) return
+  if (requireRunning) await assertResearchRunActive(context, session)
+  const row = await RuntimeInstance.collection.findOne({ _id: context.scope.runtimeInstanceId,
+    customerId: context.scope.customerId, tenantId: context.scope.tenantId }, { session, maxTimeMS: 2000,
+    projection: { researchConfiguration: 1, customerId: 1, tenantId: 1, runtimeInstanceKey: 1, stateVersion: 1, updatedAt: 1 } })
+  const record = row && validateStoredResearchConfiguration(row.researchConfiguration, row)
+  if (!record || snapshotHash(researchConfigurationReference(record)) !== snapshotHash(researchConfigurationReference(context.researchConfiguration))
+    || requireCanonicalRuntimeStateVersion(row) !== context.basisStateVersion
+    || new Date(row.updatedAt).getTime() !== new Date(context.payload.expectedUpdatedAt).getTime())
+    fail('RESEARCH_CONFIGURATION_STALE', 'Research configuration changed before the controlled save.', 409, context.runId)
+}
 const assertCurrentControl = async (context, session) => {
+  await assertAcquisitionResearchConfigurationCurrent(context, session)
   const row = await RuntimeInstance.collection.findOne({ _id: context.scope.runtimeInstanceId,
     customerId: context.scope.customerId, tenantId: context.scope.tenantId }, { session, maxTimeMS: 2000,
     projection: { stateVersion: 1, updatedAt: 1, status: 1, executionStatus: 1, lockedAt: 1,
@@ -217,7 +267,10 @@ const assertCurrentControl = async (context, session) => {
   if (row.status !== 'ACTIVE' || ['RUNNING', 'VALIDATING', 'COMPLETE', 'ERROR'].includes(row.executionStatus)
     || isRuntimeLocked({ runtimeInstance: row }) || isRuntimeLifecycleTruthImmutable(row.framework_state))
     fail('ACQUISITION_RUN_LOCKED', 'This revision does not permit acquisition. Inspect or open an editable revision.', 409, context.runId)
-  if (context.controlledContext) assertControlledReplayCurrent(context.controlledContext, row, context.payload)
+  if (context.controlledContext) {
+    assertControlledReplayCurrent(context.controlledContext, row, context.payload)
+    await verifyControlledReplayCurrentAuthority(context.controlledContext, { ...row, _id: context.scope.runtimeInstanceId }, session)
+  }
 }
 export const startAcquisitionRun = async (context, inputs) => {
   const controlled = context.controlledContext ? assertResolvedControlledReplay(context.controlledContext) : undefined
@@ -243,6 +296,8 @@ export const startAcquisitionRun = async (context, inputs) => {
     actorUserId: context.actorUserId, authority: 'VMF_UPDATE', actionKey: context.actionKey, acquisitionProfile: plan.profile,
     basisStateVersion: context.basisStateVersion, basisUpdatedAt: new Date(context.payload.expectedUpdatedAt),
     ...(context.payload.predecessorRunId ? { predecessorRunId: context.payload.predecessorRunId } : {}),
+    ...(context.payload.predecessorExecutionAttemptId ? { predecessorExecutionAttemptId: context.payload.predecessorExecutionAttemptId } : {}),
+    ...(context.researchConfiguration ? { researchConfiguration: context.researchConfiguration } : {}),
     inputs: descriptors, status: 'QUEUED', active: true, createdAt: new Date() }
   try {
     await withAcquisitionTransaction(async session => {
@@ -252,6 +307,14 @@ export const startAcquisitionRun = async (context, inputs) => {
         if (!predecessor || !['FAILED', 'PARTIALLY_SUCCEEDED'].includes(predecessor.status))
           fail('ACQUISITION_PREDECESSOR_INVALID', 'Retry must identify an unsuccessful Run in this exact revision.', 409, context.runId)
         await verifyTerminal(predecessor, Date.now() + 6000, session)
+        if (context.researchConfiguration && (predecessor.status !== 'FAILED' || predecessor.canonicalSaved !== false
+          || String(predecessor.actorUserId) !== String(context.actorUserId)
+          || predecessor.executionAttemptId !== base.predecessorExecutionAttemptId
+          || predecessor.basisStateVersion !== context.basisStateVersion
+          || new Date(predecessor.basisUpdatedAt).getTime() !== base.basisUpdatedAt.getTime()
+          || snapshotHash(predecessor.researchConfiguration || null) !== snapshotHash(context.researchConfiguration)
+          || snapshotHash(predecessor.controlledReplayProvenance || null) !== snapshotHash(controlled.descriptor)))
+          fail('ACQUISITION_PREDECESSOR_INVALID', 'Research retry requires the exact verified failed, unsaved predecessor and unchanged configuration.', 409, context.runId)
       }
       const audit = await recordedAudit({ context, phase: 'QUEUED', session })
       const row = new RuntimeAcquisitionRun({ ...base, admissionAuditId: audit._id, admissionAuditSignatureVersion: audit.signatureVersion })
@@ -268,8 +331,10 @@ export const startAcquisitionRun = async (context, inputs) => {
     }
   }
   let row = await readExact(identity(context))
+  if (row?.status === 'CANCELLED') { context.row = row; await verifyTerminal(row, Date.now() + 6000); fail('ACQUISITION_RUN_NOT_ACTIVE', 'Run was cancelled before starting.', 409, context.runId) }
   if (!row || row.status !== 'QUEUED') fail('ACQUISITION_OUTCOME_UNCONFIRMED', 'Acquisition admission could not be confirmed. Refresh.', 503, context.runId)
   await verifiedAudit(row, row.admissionAuditId, 'QUEUED', Date.now() + 6000)
+  if (context.researchConfiguration) context.row = row
   try {
     await withAcquisitionTransaction(async session => {
       await assertCurrentControl(context, session)
@@ -413,6 +478,7 @@ export const bindAcquisitionSourceProcessing = (context, pack) => {
 }
 
 export const executeAcquisitionBuild = async (context, build) => {
+  await assertResearchRunActive(context)
   let timer
   try {
     const result = await Promise.race([Promise.resolve().then(build), new Promise((_, reject) => {
@@ -501,6 +567,7 @@ export const recoverStoppedAcquisitionRun = async ({ runId, runtimeInstanceId, a
     if (!runtime || snapshotHash(runtime) !== proof.rootHash)
       fail('ACQUISITION_RUN_STALE', 'Recovery runtime basis changed.', 409, runId)
     const context = { runtime, scope, row, actorUserId, runId, executionAttemptId: row.executionAttemptId,
+      ...(row.researchConfiguration ? { researchConfiguration: row.researchConfiguration } : {}),
       requestFingerprint: row.requestFingerprint, basisStateVersion: row.basisStateVersion,
       payload: { expectedUpdatedAt: row.basisUpdatedAt }, recoveryWitness: proof,
       auditRequest: { requestId: `recovery-${randomUUID()}` } }
@@ -553,7 +620,7 @@ const loadReadContext = async (args, deadline) => {
   try {
     await session.withTransaction(async () => {
       runtime = await getRuntimeInstance({ scopes: args.scopes, runtimeInstanceId: args.runtimeInstanceId,
-        projection: 'customerId tenantId runtimeInstanceKey runtimeType revision stateVersion updatedAt',
+        projection: 'customerId tenantId runtimeInstanceKey runtimeType revision stateVersion updatedAt status lockedAt framework_state.lock framework_state.publish framework_state.lifecycle',
         maxTimeMS: queryBudget(deadline).maxTimeMS, metadataMaxTimeMS: 2000, session })
       queryBudget(deadline)
       await assertRuntimePermission({ actorUserId: args.actorUserId, scopes: args.scopes,
@@ -563,6 +630,7 @@ const loadReadContext = async (args, deadline) => {
   await requireIndexes(deadline)
   return runtime
 }
+const requestLookupFilter = args => args.query?.requestKey ? { requestKey: args.query.requestKey, actorUserId: new mongoose.Types.ObjectId(args.actorUserId) } : {}
 const readAcquisitionRuns = async args => {
   const deadline = Date.now() + 6000
   const runtime = await loadReadContext(args, deadline), scope = scopeFor(runtime)
@@ -575,16 +643,17 @@ const readAcquisitionRuns = async args => {
       after = { $or: [{ createdAt: { $lt: new Date(parsed.time) } }, { createdAt: new Date(parsed.time), _id: { $lt: new mongoose.Types.ObjectId(parsed.id) } }] }
     } catch { fail('ACQUISITION_CURSOR_INVALID', 'Acquisition history cursor is invalid.', 422) }
   }
-  const projection = Object.fromEntries(['contractVersion', 'runId', 'requestKey', 'customerId', 'tenantId', 'runtimeInstanceId',
+  const projection = Object.fromEntries(['contractVersion', 'plannerVersion', 'controlledReplayProvenance', 'researchConfiguration', 'executionAttemptId', 'runId', 'requestKey', 'customerId', 'tenantId', 'runtimeInstanceId',
     'runtimeInstanceKey', 'rootRuntimeInstanceKey', 'actorUserId', 'authority', 'actionKey', 'acquisitionProfile', 'basisStateVersion',
-    'basisUpdatedAt', 'status', 'createdAt', 'startedAt', 'completedAt', 'predecessorRunId', 'canonicalSaved', 'outputStateVersion',
+    'basisUpdatedAt', 'status', 'createdAt', 'startedAt', 'completedAt', 'predecessorRunId', 'predecessorExecutionAttemptId', 'canonicalSaved', 'outputStateVersion',
     'outcomes.kind', 'outcomes.inputIndex', 'outcomes.status', 'outcomes.sourceId', 'outcomes.evidenceObjectCount', 'outcomes.reason',
     'admissionAuditId', 'startAuditId', 'terminalAuditId', 'saveAuditId', 'reason'].map(key => [key, 1]))
-  const rows = await RuntimeAcquisitionRun.collection.find({ ...scope, ...after }, { ...queryBudget(deadline), projection })
+  const rows = await RuntimeAcquisitionRun.collection.find({ ...scope, ...requestLookupFilter(args), ...after }, { ...queryBudget(deadline), projection })
     .sort({ createdAt: -1, _id: -1 }).limit(26).batchSize(26).toArray()
   const items = rows.slice(0, 25), last = items.at(-1), hasMore = rows.length > 25
   return { contractVersion: ACQUISITION_RUN_VERSION, scope: { ...Object.fromEntries(Object.entries(scope).map(([key, value]) => [key, String(value)])),
     runtimeInstanceKey: runtime.runtimeInstanceKey }, observedStateVersion: runtime.stateVersion,
+  ...(args.query?.requestKey ? { requestedRequestKey: args.query.requestKey } : {}),
   items: items.map(row => publicAcquisitionRun(row)), hasMore,
   nextCursor: hasMore ? Buffer.from(JSON.stringify({ id: String(last._id), time: last.createdAt.toISOString() })).toString('base64url') : null,
   completeness: hasMore ? 'MORE_PAGES' : 'COMPLETE_PAGE', verification: 'RECORDED_HISTORY_PREVIEW',
@@ -593,10 +662,14 @@ const readAcquisitionRuns = async args => {
 const readAcquisitionRun = async args => {
   const deadline = Date.now() + 6000
   const runtime = await loadReadContext(args, deadline)
-  const row = await readExact({ ...scopeFor(runtime), runId: args.runId }, deadline)
+  const row = await readExact({ ...scopeFor(runtime), runId: args.runId, ...requestLookupFilter(args) }, deadline)
   if (!row) fail('ACQUISITION_RUN_NOT_FOUND', 'Acquisition Run not found in this revision.', 404)
   if (terminal(row)) await verifyTerminal(row, deadline)
-  return publicAcquisitionRun(row, { observedStateVersion: runtime.stateVersion,
+  else if (row.researchConfiguration) {
+    await verifiedAudit(row, row.admissionAuditId, 'QUEUED', deadline)
+    if (row.startedAt) await verifiedAudit(row, row.startAuditId, 'RUNNING', deadline)
+  }
+  return publicAcquisitionRun(row, { ...(row.researchConfiguration ? { cancellation: cancellationDescriptor(row, cancellationEligible(row, runtime, args.actorUserId)) } : {}), observedStateVersion: runtime.stateVersion,
     currency: row.outputStateVersion === runtime.stateVersion ? 'CURRENT_OUTPUT' : terminal(row) ? 'HISTORICAL_OUTPUT' : 'ACTIVE' })
 }
 const safeRead = async (args, read) => {
@@ -608,3 +681,51 @@ const safeRead = async (args, read) => {
 }
 export const getAcquisitionRuns = args => safeRead(args, readAcquisitionRuns)
 export const getAcquisitionRun = args => safeRead(args, readAcquisitionRun)
+
+// Cancellation fences this controlled attempt's save; it never claims worker/provider abort.
+export const cancelAcquisitionRun = async args => {
+  if (!args.payload || Object.keys(args.payload).length !== 1 || !uuid.test(args.payload.executionAttemptId))
+    fail('ACQUISITION_CANCELLATION_INVALID', 'An exact execution attempt is required.', 422, args.runId)
+  if (!['development', 'test'].includes(env.nodeEnv) || env.appEnv !== 'development')
+    fail('ACQUISITION_CANCELLATION_UNAVAILABLE', 'Controlled cancellation is unavailable in this environment.', 409, args.runId)
+  await requireIndexes(Date.now() + 6000)
+  await withAcquisitionTransaction(async session => {
+    const runtime = await getRuntimeInstance({ scopes: args.scopes, runtimeInstanceId: args.runtimeInstanceId, session,
+      projection: 'customerId tenantId runtimeInstanceKey runtimeType revision stateVersion updatedAt status lockedAt framework_state.lock framework_state.publish framework_state.lifecycle',
+      maxTimeMS: 2000, metadataMaxTimeMS: 2000 })
+    await assertRuntimePermission({ actorUserId: args.actorUserId, scopes: args.scopes, customerId: runtime.customerId,
+      tenantId: runtime.tenantId, permission: 'VMF_UPDATE', session, maxTimeMS: 2000 })
+    const scope = scopeFor(runtime), row = await RuntimeAcquisitionRun.collection.findOne({ ...scope, runId: args.runId }, { session, maxTimeMS: 2000 })
+    if (!row) fail('ACQUISITION_RUN_NOT_FOUND', 'Acquisition Run not found in this revision.', 404, args.runId)
+    if (String(row.actorUserId) !== String(args.actorUserId)) throw Object.assign(new Error('Only the original actor can cancel this controlled attempt.'), {
+      status: 403, code: 'FORBIDDEN', details: { reason: 'ACQUISITION_CANCELLATION_FORBIDDEN', runId: args.runId },
+    })
+    if (row.executionAttemptId !== args.payload.executionAttemptId)
+      fail('ACQUISITION_CANCELLATION_STALE', 'The execution attempt does not match this Run.', 409, args.runId)
+    if (!row.researchConfiguration || row.contractVersion !== CONTROLLED_ACQUISITION_RUN_VERSION)
+      fail('ACQUISITION_CANCELLATION_UNAVAILABLE', 'Only controlled research attempts support cancellation here.', 409, args.runId)
+    validateResearchRunConfiguration(row)
+    if (row.status === 'CANCELLED') { await verifyTerminal(row, Date.now() + 6000, session); return }
+    if (terminal(row)) { await verifyTerminal(row, Date.now() + 6000, session); fail('ACQUISITION_ALREADY_COMPLETED', 'This Run already completed. Its saved material is unchanged.', 409, args.runId) }
+    if (!cancellationEligible(row, runtime, args.actorUserId))
+      fail('ACQUISITION_CANCELLATION_UNAVAILABLE', 'The current revision does not permit this cancellation.', 409, args.runId)
+    await verifiedAudit(row, row.admissionAuditId, 'QUEUED', Date.now() + 6000, session)
+    if (row.startedAt) await verifiedAudit(row, row.startAuditId, 'RUNNING', Date.now() + 6000, session)
+    if (row.status === 'RUNNING' && !row.startedAt || row.status === 'QUEUED' && (row.startedAt || row.startAuditId || row.startAuditSignatureVersion))
+      fail('ACQUISITION_RECEIPT_UNVERIFIED', 'Attempt start could not be verified.', 503, args.runId)
+    const context = { runtime, scope, row, actorUserId: args.actorUserId, runId: row.runId, executionAttemptId: row.executionAttemptId,
+      requestFingerprint: row.requestFingerprint, researchConfiguration: row.researchConfiguration, auditRequest: { requestId: args.requestId } }
+    const completedAt = new Date(), outcomes = row.inputs.map(({ kind, inputIndex }) => ({ kind, inputIndex,
+      status: 'CANCELLED', evidenceObjectCount: 0, reason: 'CANCELLED_BEFORE_SAVE' }))
+    const audit = await recordedAudit({ context, phase: 'CANCELLED', session, extra: {
+      outcomeHash: snapshotHash(outcomes), canonicalSaved: false, outputStateVersion: null, saveAuditId: null, saveAuditSignature: null,
+      cancellationStage: row.startedAt ? 'RUNNING' : 'QUEUED', cancelledAt: completedAt.toISOString(), workerStopConfirmed: false,
+    } })
+    const fields = { status: 'CANCELLED', active: false, canonicalSaved: false, reason: 'CANCELLED_BEFORE_SAVE', outcomes, completedAt,
+      terminalAuditId: audit._id, terminalAuditSignatureVersion: audit.signatureVersion }
+    await new RuntimeAcquisitionRun({ ...row, ...fields }).validate()
+    const changed = await RuntimeAcquisitionRun.collection.updateOne({ ...identity(context), status: row.status, active: true }, { $set: fields }, { session })
+    if (changed.modifiedCount !== 1) fail('ACQUISITION_RUN_STALE', 'Completion or cancellation already owns this Run.', 409, args.runId)
+  })
+  return getAcquisitionRun(args)
+}

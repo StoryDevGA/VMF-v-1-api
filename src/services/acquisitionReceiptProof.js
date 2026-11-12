@@ -1,3 +1,4 @@
+import { validateResearchRunConfiguration, researchConfigurationReference } from './researchConfigurationContract.js'
 import AuditLog from '../models/AuditLog.js'
 import { snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
 import { validateControlledReplayRunIdentity } from './controlledReplayContract.js'
@@ -35,6 +36,15 @@ export const assertAcquisitionTerminalProof = (row, terminalAudit, saveAnchor) =
     details: { reason: 'ACQUISITION_RECEIPT_UNVERIFIED', runId: row.runId },
   }) }
   const audit = terminalAudit instanceof AuditLog ? terminalAudit : terminalAudit ? AuditLog.hydrate(terminalAudit) : null
+  const retry = row.predecessorExecutionAttemptId ? { predecessorRunId: row.predecessorRunId, predecessorExecutionAttemptId: row.predecessorExecutionAttemptId } : null
+  if (snapshotHash(retry) !== snapshotHash(audit?.diff?.researchRetry || null)
+    || row.researchConfiguration && Boolean(row.predecessorRunId) !== Boolean(row.predecessorExecutionAttemptId)
+    || row.predecessorExecutionAttemptId && !row.researchConfiguration) invalid()
+  if (row.researchConfiguration !== undefined || audit?.diff?.researchConfiguration !== undefined) {
+    let record
+    try { record = validateResearchRunConfiguration(row) } catch { invalid() }
+    if (snapshotHash(researchConfigurationReference(record) || null) !== snapshotHash(audit?.diff?.researchConfiguration || null)) invalid()
+  }
   if (row.contractVersion === 'controlled-acquisition-run.v1') {
     if (audit?.diff?.controlledRun === undefined) invalid()
     let descriptor
@@ -68,6 +78,14 @@ export const assertAcquisitionTerminalProof = (row, terminalAudit, saveAnchor) =
     || saveAnchor.signature !== row.saveAuditSignature
     || saveAnchor.signatureVersion !== row.saveAuditSignatureVersion
     || !['RUNTIME_STATE_MUTATED', 'RUNTIME_ACTION_EXECUTED'].includes(saveAnchor.action))) invalid()
+  if (row.status === 'CANCELLED') {
+    if (row.contractVersion !== 'controlled-acquisition-run.v1' || !row.researchConfiguration || row.active !== false
+      || row.canonicalSaved !== false || row.outputStateVersion || row.saveAuditId || row.reason !== 'CANCELLED_BEFORE_SAVE'
+      || Boolean(row.startedAt) !== Boolean(row.startAuditId) || Boolean(row.startedAt) !== Boolean(row.startAuditSignatureVersion)
+      || audit.diff.cancellationStage !== (row.startedAt ? 'RUNNING' : 'QUEUED') || audit.diff.workerStopConfirmed !== false
+      || audit.diff.cancelledAt !== new Date(row.completedAt).toISOString()
+      || row.outcomes?.some(item => item.status !== 'CANCELLED' || item.evidenceObjectCount !== 0 || item.reason !== 'CANCELLED_BEFORE_SAVE' || item.sourceId || item.contentHash)) invalid()
+  } else if (row.outcomes?.some(item => item.status === 'CANCELLED')) invalid()
   if (row.reason === STOPPED_WORKER_RECOVERY_REASON || row.outcomes?.some(item => item.reason === ORIGINAL_EXTRACTION_UNCONFIRMED)) {
     assertStoppedRecoveryWitness(row, audit.diff.recoveryWitness)
     if (row.reason !== STOPPED_WORKER_RECOVERY_REASON || row.status !== 'FAILED' || row.canonicalSaved !== false

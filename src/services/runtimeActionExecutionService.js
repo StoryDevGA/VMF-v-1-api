@@ -1,3 +1,5 @@
+import { assertResearchDispatchPayload } from './researchConfigurationContract.js'
+import { resolveResearchDispatchConfiguration } from './researchConfigurationService.js'
 import mongoose from 'mongoose'
 import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation, controlledReplayIsolationCas,
   controlledReplayIsolationWrite, controlledReplayIsolationAudit, controlledReplayIsolationRollback } from './controlledReplayIsolationService.js'
@@ -5,7 +7,7 @@ import { resolveControlledReplayAcquisition, assertControlledReplayCurrent } fro
 import { resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution,
   permitsLocalDiscoveryCandidateAcquisition, fenceInstalledDiscoveryPolicy } from './discoveryPolicyContract.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
-  recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
+  recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing, assertAcquisitionResearchConfigurationCurrent } from './acquisitionRunService.js'
 import { assertCustomerSectionTarget, buildRuntimeManagedSourceReceipt } from './runtimeManagedSectionService.js'
 import { FrameworkPackage, RuntimeInstance } from '../models/index.js'
 import { RUNTIME_TYPES } from '../models/RuntimeInstance.js'
@@ -1627,6 +1629,7 @@ const persistActionWithAudit = async ({
     let graphLifecycle = null
     let sourceRollover = null
     const persist = async (session) => {
+        await assertAcquisitionResearchConfigurationCurrent(acquisitionContext, session, true)
         if (freezeEvidence && session?.inTransaction?.() !== true) throw buildActionError({
           status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Lock evidence membership requires transactional storage.', reason: 'LOCK_MEMBERSHIP_TRANSACTION_REQUIRED',
         })
@@ -1872,6 +1875,7 @@ export const executeRuntimeAction = async ({
   const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
   const expectedUpdatedAt = payload?.expectedUpdatedAt
 
+  assertResearchDispatchPayload(payload, normalizedActionKey)
   assertActionSupported(normalizedActionKey)
 
   const runtimeInstance = await resolveRuntimeInstanceDocument({ runtimeInstanceId })
@@ -1926,6 +1930,9 @@ export const executeRuntimeAction = async ({
   const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
     ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest, controlledContext }) : null
   if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
+  if (payload?.researchConfiguration) acquisitionContext.researchConfiguration = await resolveResearchDispatchConfiguration({
+    payload, fixtureUrl: controlledContext.descriptor.binding.fixture.sourceUrl, scopes, actorUserId, runtimeInstanceId,
+  })
   if (controlledContext) assertControlledReplayCurrent(controlledContext, runtimeInstance, payload)
 
   assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })

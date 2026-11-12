@@ -1,3 +1,4 @@
+import { researchConfigurationSelectorSchema } from '../services/researchConfigurationContract.js'
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { postLockSubmissionSchema } from '../services/postLockEvidenceIntakeContract.js'
@@ -701,9 +702,11 @@ const acceptRuntimeSectionSchema = z.object({
 }).strict()
 
 const executeRuntimeActionSchema = z.object({
+  researchConfiguration: researchConfigurationSelectorSchema.optional(),
   controlledReplay: controlledReplaySelectorSchema.optional(),
   requestKey: acquisitionRequestKeySchema.optional(),
   predecessorRunId: acquisitionRequestKeySchema.optional(),
+  predecessorExecutionAttemptId: acquisitionRequestKeySchema.optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
   inputs: discoveryInputsSchema.optional(),
   acquisitionProfile: discoveryAcquisitionProfileSchema,
@@ -783,6 +786,13 @@ const getSectionKeyFromRuntimePath = (runtimePath) => {
 }
 
 const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchema.superRefine((data, ctx) => {
+  if (Object.hasOwn(data, 'researchConfiguration') && (actionKey !== 'BUILD_EVIDENCE_PACK' || !data.controlledReplay
+    || !data.requestKey || Boolean(data.predecessorRunId) !== Boolean(data.predecessorExecutionAttemptId) || data.inputs !== undefined || data.documentSources !== undefined)) ctx.addIssue({
+    code: z.ZodIssueCode.custom, path: ['researchConfiguration'], message: 'Research dispatch requires an explicit unmixed controlled fixture build.',
+  })
+  if (data.predecessorExecutionAttemptId !== undefined && (!data.researchConfiguration || !data.controlledReplay || !data.predecessorRunId)) ctx.addIssue({
+    code: z.ZodIssueCode.custom, path: ['predecessorExecutionAttemptId'], message: 'An exact predecessor Attempt belongs only to an explicit research retry.',
+  })
   if (Object.hasOwn(data, 'controlledReplay') && (!['BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'].includes(actionKey)
     || data.inputs !== undefined || data.documentSources !== undefined)) ctx.addIssue({
     code: z.ZodIssueCode.custom, path: ['controlledReplay'],

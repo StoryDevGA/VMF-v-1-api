@@ -1,3 +1,4 @@
+import { validateResearchRunConfiguration } from '../services/researchConfigurationContract.js'
 import mongoose from 'mongoose'
 import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance } from '../services/controlledReplayContract.js'
 
@@ -5,7 +6,7 @@ export const ACQUISITION_RUN_VERSION = 'acquisition-run.v1'
 export const ACQUISITION_PLANNER_VERSION = 'discovery-acquisition-planner.v1'
 export const CONTROLLED_ACQUISITION_RUN_VERSION = 'controlled-acquisition-run.v1'
 export const CONTROLLED_ACQUISITION_PLANNER_VERSION = 'controlled-acquisition-planner.v1'
-export const ACQUISITION_TERMINAL_STATES = ['SUCCEEDED', 'PARTIALLY_SUCCEEDED', 'FAILED']
+export const ACQUISITION_TERMINAL_STATES = ['SUCCEEDED', 'PARTIALLY_SUCCEEDED', 'FAILED', 'CANCELLED']
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const text = maxlength => ({ type: String, required: true, maxlength, immutable: true })
 const id = ref => ({ type: mongoose.Schema.Types.ObjectId, ref, required: true, immutable: true })
@@ -18,7 +19,7 @@ const inputSchema = new mongoose.Schema({
 const outcomeSchema = new mongoose.Schema({
   kind: { type: String, required: true, enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED'] },
   inputIndex: { type: Number, required: true, min: 0, max: 9 },
-  status: { type: String, required: true, enum: ['SUCCEEDED', 'FAILED', 'UNATTEMPTED'] },
+  status: { type: String, required: true, enum: ['SUCCEEDED', 'FAILED', 'UNATTEMPTED', 'CANCELLED'] },
   sourceId: { type: String, maxlength: 160, match: /^[A-Za-z0-9_-]+$/ },
   contentHash: { type: String, match: /^[a-f0-9]{64}$/ },
   evidenceObjectCount: { type: Number, min: 0, required: true },
@@ -30,6 +31,7 @@ const schema = new mongoose.Schema({
   runId: { ...text(36), match: uuid }, requestKey: { ...text(36), match: uuid },
   executionAttemptId: { ...text(36), match: uuid },
   requestFingerprint: hash, plannerFingerprint: hash,
+  researchConfiguration: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true },
   contractVersion: { ...text(80), enum: [ACQUISITION_RUN_VERSION, CONTROLLED_ACQUISITION_RUN_VERSION] },
   plannerVersion: { ...text(80), enum: [ACQUISITION_PLANNER_VERSION, CONTROLLED_ACQUISITION_PLANNER_VERSION] },
   controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined, immutable: true,
@@ -39,6 +41,7 @@ const schema = new mongoose.Schema({
   acquisitionProfile: { ...text(40), enum: ['STANDARD', 'ENHANCED'] },
   basisStateVersion: text(100), basisUpdatedAt: { type: Date, required: true, immutable: true },
   predecessorRunId: { type: String, maxlength: 36, match: uuid, immutable: true },
+  predecessorExecutionAttemptId: { type: String, maxlength: 36, match: uuid, immutable: true },
   inputs: { type: [inputSchema], required: true, immutable: true },
   status: { type: String, required: true, enum: ['QUEUED', 'RUNNING', ...ACQUISITION_TERMINAL_STATES] },
   active: { type: Boolean, required: true },
@@ -61,6 +64,10 @@ schema.index({ customerId: 1, tenantId: 1, runtimeInstanceId: 1, createdAt: -1, 
 schema.index({ customerId: 1, tenantId: 1, runtimeInstanceId: 1, runId: 1 },
   { unique: true, name: 'unique_scoped_acquisition_run' })
 schema.pre('validate', function () {
+  if (this.predecessorExecutionAttemptId !== undefined && (!this.researchConfiguration || !this.predecessorRunId)
+    || this.researchConfiguration && Boolean(this.predecessorRunId) !== Boolean(this.predecessorExecutionAttemptId))
+    this.invalidate('predecessorExecutionAttemptId', 'Research retry requires its exact predecessor Run and Attempt.')
+  try { validateResearchRunConfiguration(this) } catch { this.invalidate('researchConfiguration', 'Research configuration must bind this controlled Run.') }
   const terminal = ACQUISITION_TERMINAL_STATES.includes(this.status)
   const controlled = this.contractVersion === CONTROLLED_ACQUISITION_RUN_VERSION
   if (controlled) {
@@ -84,14 +91,14 @@ schema.pre('validate', function () {
   if (!controlled && (counts.get('BRIEF') !== 1 || (counts.get('WEBSITE') || 0) > 10 || (counts.get('DOCUMENT') || 0) > 5))
     this.invalidate('inputs', 'Acquisition inputs exceed the existing contract.')
   if (this.active === terminal || terminal !== Boolean(this.completedAt)) this.invalidate('status', 'Terminal and active state disagree.')
-  if (this.status !== 'QUEUED' && (!this.startedAt || !this.startAuditId || !this.startAuditSignatureVersion))
+  if (this.status !== 'QUEUED' && !(this.status === 'CANCELLED' && !this.startedAt) && (!this.startedAt || !this.startAuditId || !this.startAuditSignatureVersion))
     this.invalidate('startedAt', 'Started execution audit is required.')
   if (terminal) {
     if (!this.terminalAuditId || !this.terminalAuditSignatureVersion || typeof this.canonicalSaved !== 'boolean')
       this.invalidate('terminalAuditId', 'A recorded terminal outcome is required.')
     if (this.canonicalSaved && (!this.outputStateVersion || !this.saveAuditId || !this.saveAuditSignatureVersion || !this.saveAuditSignature))
       this.invalidate('saveAuditId', 'Saved outcome proof is required.')
-    if (!this.canonicalSaved && (this.status !== 'FAILED' || this.outputStateVersion || this.saveAuditId))
+    if (!this.canonicalSaved && (!['FAILED', 'CANCELLED'].includes(this.status) || this.outputStateVersion || this.saveAuditId))
       this.invalidate('canonicalSaved', 'An unsaved operation cannot claim success.')
     if (this.outcomes?.length !== this.inputs.length || this.outcomes?.some((item, index) => {
       const input = this.inputs[index]
@@ -100,6 +107,14 @@ schema.pre('validate', function () {
         || item.status !== 'SUCCEEDED' && item.evidenceObjectCount !== 0
         || item.status === 'SUCCEEDED' && item.kind !== 'BRIEF' && (!item.sourceId || this.canonicalSaved && !item.contentHash)
     })) this.invalidate('outcomes', 'Actual input outcomes do not reconcile.')
+    if (this.status === 'CANCELLED' && (!controlled || !this.researchConfiguration || this.canonicalSaved
+      || this.reason !== 'CANCELLED_BEFORE_SAVE' || Boolean(this.startedAt) !== Boolean(this.startAuditId)
+      || Boolean(this.startedAt) !== Boolean(this.startAuditSignatureVersion)
+      || this.outcomes?.some(item => item.status !== 'CANCELLED' || item.evidenceObjectCount !== 0
+        || item.reason !== 'CANCELLED_BEFORE_SAVE' || item.sourceId || item.contentHash)))
+      this.invalidate('status', 'Cancellation must describe an unsaved controlled research operation.')
+    if (this.status !== 'CANCELLED' && this.outcomes?.some(item => item.status === 'CANCELLED'))
+      this.invalidate('outcomes', 'Only cancelled Runs have cancelled outcomes.')
     const allSucceeded = this.outcomes?.every(item => item.status === 'SUCCEEDED')
     const someSucceeded = this.outcomes?.some(item => item.status === 'SUCCEEDED')
     if (this.canonicalSaved && this.status !== (allSucceeded ? 'SUCCEEDED' : someSucceeded ? 'PARTIALLY_SUCCEEDED' : 'FAILED'))

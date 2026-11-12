@@ -24,23 +24,35 @@ export const assertResolvedControlledReplay = context => {
   if (!context || !resolved.has(context)) fail('CONTROLLED_REPLAY_NOT_ACTIVATED')
   return context
 }
-export const resolveControlledReplayAcquisition = async ({ payload, runtimeInstance, actorUserId, actionKey }) => {
+const verifyRegistration = async ({ registration, binding, runtimeInstance, actorUserId, session }) => {
+  const authority = await verifyControlledReplayAuthority({ registration, binding, runtimeInstance, actorUserId, session })
+  if (authority?.authorityRef !== binding.authorityRef) fail('CONTROLLED_REPLAY_AUTHORITY_UNVERIFIED')
+  const exclusions = await verifyControlledReplayExclusions({ registration, binding, runtimeInstance, actorUserId, session })
+  if (exclusions?.isolationRef !== binding.isolationRef || exclusions.parlon !== false || exclusions.heldSs044Family !== false)
+    fail('CONTROLLED_REPLAY_PROTECTED_SCOPE_UNVERIFIED')
+  return { authority, exclusions }
+}
+export const verifyControlledReplayCurrentAuthority = async (context, runtimeInstance, session = null) => {
+  const resolvedContext = assertResolvedControlledReplay(context), binding = resolvedContext.descriptor.binding
+  const registration = CONTROLLED_REPLAY_BINDINGS.find(entry => entry.binding?.bindingId === binding.bindingId)
+  if (!registration || storedControlledReplayBindingDigest(registration.binding) !== storedControlledReplayBindingDigest(binding))
+    fail('CONTROLLED_REPLAY_AUTHORITY_UNVERIFIED')
+  await verifyRegistration({ registration, binding, runtimeInstance, actorUserId: resolvedContext.actorUserId, session })
+}
+export const resolveControlledReplayAcquisition = async ({ payload, runtimeInstance, actorUserId, actionKey, session = null }) => {
   if (!payload || !Object.hasOwn(payload, 'controlledReplay')) return undefined
   const selector = controlledReplaySelectorSchema.safeParse(payload.controlledReplay)
   const entry = selector.success && CONTROLLED_REPLAY_BINDINGS.find(row => row.binding?.bindingId === selector.data.bindingId)
   if (!entry || !['BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'].includes(actionKey)) fail('CONTROLLED_REPLAY_NOT_ACTIVATED')
   const binding = JSON.parse(JSON.stringify(assertStoredControlledReplayBinding(entry.binding)))
-  const authority = await verifyControlledReplayAuthority({ registration: entry, binding, runtimeInstance, actorUserId })
-  if (authority?.authorityRef !== binding.authorityRef) fail('CONTROLLED_REPLAY_AUTHORITY_UNVERIFIED')
-  const exclusions = await verifyControlledReplayExclusions({ registration: entry, binding, runtimeInstance, actorUserId })
-  if (exclusions?.isolationRef !== binding.isolationRef || exclusions.parlon !== false || exclusions.heldSs044Family !== false)
-    fail('CONTROLLED_REPLAY_PROTECTED_SCOPE_UNVERIFIED')
+  const { authority, exclusions } = await verifyRegistration({ registration: entry, binding, runtimeInstance, actorUserId, session })
   const identity = native(runtimeInstance)
   if (Object.keys(binding.scope).some(key => binding.scope[key] !== identity[key])
     || binding.revisionId !== identity.runtimeInstanceKey || binding.actorUserId !== String(actorUserId)
     || !['development', 'test'].includes(env.nodeEnv) || env.appEnv !== 'development'
     || isControlledSyntheticOutcomeRuntime(runtimeInstance)) fail('CONTROLLED_REPLAY_CONTRACT_INVALID')
-  if (payload.documentSources?.length || payload.predecessorRunId || payload.inputs !== undefined)
+  if (payload.documentSources?.length || payload.inputs !== undefined
+    || payload.predecessorRunId && (!payload.researchConfiguration || !payload.predecessorExecutionAttemptId))
     fail('CONTROLLED_REPLAY_MIXED_INPUTS')
   const provenance = { contractVersion: 'controlled-replay-provenance.v1', classification: binding.classification,
     operation: 'CONTROLLED_HTML_REPLAY_CAPTURE', adapter: 'controlled-html-replay-v1', bindingId: binding.bindingId,
@@ -55,7 +67,7 @@ export const resolveControlledReplayAcquisition = async ({ payload, runtimeInsta
       || createHash('sha256').update(asset.html).digest('hex') !== binding.fixture.htmlSha256) throw new Error('HTML changed.')
   } catch { fail('CONTROLLED_REPLAY_ASSET_UNVERIFIED') }
   const context = freeze({ descriptor, native: identity, actorUserId: String(actorUserId), html: asset.html,
-    // Explicitly a component witness, never a native authority receipt.
+    // Local engineering qualification (or disclosed test witness), never provider/Product approval.
     authority, exclusions })
   resolved.add(context)
   return context

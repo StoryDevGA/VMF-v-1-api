@@ -31,11 +31,11 @@ import { validateDocxPagePreviewCreate, validateDocxPagePreviewParams } from '..
 import { readReviewCompletion, recordReviewCompletion, readPublishedDispositionRecovery, recordSupplementalPublishedDisposition,
   readSupplementalFindingReview, recordSupplementalFinding, readRuntimeProductAuthority, recordRuntimeProductAuthority,
   readEvidenceSnapshotRecovery, recordEvidenceSnapshotRecovery } from '../controllers/reviewCompletion.controller.js'
-import { readAcquisitionRuns, readAcquisitionRun } from '../controllers/acquisitionRun.controller.js'
+import { readAcquisitionRuns, readAcquisitionRun, readResearchConfiguration, writeResearchConfiguration, cancelRecordedAcquisitionRun } from '../controllers/acquisitionRun.controller.js'
 import { getRuntimeStateSourceSummary, getRuntimeStateEvidenceInventory, getRuntimeStateDiscoveryHealth, getRuntimeStateLockBasis, getRuntimeStateContradictionHistory, getRuntimeStateFindings } from '../controllers/runtimeInstance.controller.js'
 import { validateContradictionHistoryQuery } from '../validators/contradictionHistory.validator.js'
 import { validateIntelligenceFindingQuery } from '../validators/intelligenceFinding.validator.js'
-import { validateAcquisitionRunScope, validateAcquisitionRunParams } from '../validators/acquisitionRun.validator.js'
+import { validateAcquisitionCancellation, validateAcquisitionRunScope, validateAcquisitionRunParams, validateResearchConfigurationScope, validateResearchConfigurationSave } from '../validators/acquisitionRun.validator.js'
 import { validateReviewCompletionBody, validateReviewCompletionScope, validatePublishedDispositionBody,
   validateSupplementalFindingBody, validateRuntimeProductAuthorityBody, validateSnapshotRecoveryBody } from '../validators/reviewCompletion.validator.js'
 import { validateGraphNeighbourhoodQuery } from '../validators/graphNeighbourhood.validator.js'
@@ -251,6 +251,9 @@ router.post('/:runtimeInstanceId/synthetic-test-disposition', validateRuntimeIns
 router.get('/:runtimeInstanceId/synthetic-test-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readSyntheticTestCompletion)
 router.post('/:runtimeInstanceId/synthetic-test-completion', validateRuntimeInstanceId, validateReviewCompletionScope, validateReviewCompletionBody, saveSyntheticTestCompletion)
 router.get('/:runtimeInstanceId/acquisition-runs', validateRuntimeInstanceId, validateAcquisitionRunScope, readAcquisitionRuns)
+router.get('/:runtimeInstanceId/research-configuration', validateRuntimeInstanceId, validateResearchConfigurationScope, readResearchConfiguration)
+router.put('/:runtimeInstanceId/research-configuration', validateRuntimeInstanceId, validateResearchConfigurationScope, validateResearchConfigurationSave, writeResearchConfiguration)
+router.post('/:runtimeInstanceId/acquisition-runs/:runId/cancel', validateAcquisitionRunParams, validateResearchConfigurationScope, validateAcquisitionCancellation, cancelRecordedAcquisitionRun)
 router.get('/:runtimeInstanceId/acquisition-runs/:runId', validateAcquisitionRunParams, validateAcquisitionRunScope, readAcquisitionRun)
 router.post('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, validateReviewCompletionBody, recordReviewCompletion)
 router.get('/:runtimeInstanceId/published-disposition-recovery', validateRuntimeInstanceId, validateReviewCompletionScope, readPublishedDispositionRecovery)
