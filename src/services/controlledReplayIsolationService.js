@@ -37,6 +37,19 @@ export const validateControlledReplayIsolation = (marker, runtime) => {
     && Object.values(marker.scope).every(value => /^[a-f0-9]{24}$/.test(value))
     && /^[a-z0-9][a-z0-9._:-]{0,159}$/.test(marker.runtimeInstanceKey) && /^sha256:[a-f0-9]{64}$/.test(marker.bindingDigest))
   if (runtime) {
+    if (runtime instanceof mongoose.Query) {
+      const filter = runtime.getFilter(), identity = ['_id', 'customerId', 'tenantId', 'runtimeInstanceKey']
+      need(identity.every(key => Object.hasOwn(filter, key) && (key === 'runtimeInstanceKey'
+        ? typeof filter[key] === 'string'
+        : typeof filter[key] === 'string' || filter[key] instanceof mongoose.Types.ObjectId)))
+      const identityPath = path => typeof path === 'string' && identity.some(key => path === key || path.startsWith(`${key}.`))
+      for (const [operator, fields] of Object.entries(runtime.getUpdate() || {})) {
+        need(operator.startsWith('$') && fields && typeof fields === 'object' && !Array.isArray(fields))
+        need(Object.entries(fields).every(([path, value]) => !identityPath(path)
+          && !(operator === '$rename' && identityPath(value))))
+      }
+      runtime = Object.fromEntries(identity.map(key => [key, filter[key]]))
+    }
     const scope = nativeScope(runtime)
     need(Object.keys(scope).every(key => marker.scope[key] === scope[key]) && marker.runtimeInstanceKey === runtime.runtimeInstanceKey)
   }
@@ -114,8 +127,13 @@ export const deriveControlledReplayIsolation = (runtime, frameworkState) => {
     classification: 'CONTROLLED_SYNTHETIC_REPLAY', scope: nativeScope(runtime), runtimeInstanceKey: runtime.runtimeInstanceKey,
     bindingDigest: digests[0] }, runtime) : undefined)
 }
-export const controlledReplayIsolationCas = runtime => ({ controlledReplayIsolation: hasMarker(runtime)
-  ? validateControlledReplayIsolation(runtime.controlledReplayIsolation, runtime) : { $exists: false } })
+export const controlledReplayIsolationCas = runtime => {
+  need(['_id', 'customerId', 'tenantId'].every(key => (typeof runtime[key] === 'string' && runtime[key].length > 0)
+    || runtime[key] instanceof mongoose.Types.ObjectId) && typeof runtime.runtimeInstanceKey === 'string' && runtime.runtimeInstanceKey.length > 0)
+  return { _id: runtime._id, customerId: runtime.customerId,
+  tenantId: runtime.tenantId, runtimeInstanceKey: runtime.runtimeInstanceKey, controlledReplayIsolation: hasMarker(runtime)
+    ? validateControlledReplayIsolation(runtime.controlledReplayIsolation, runtime) : { $exists: false } }
+}
 export const controlledReplayIsolationWrite = (runtime, frameworkState, session) => {
   const marker = deriveControlledReplayIsolation(runtime, frameworkState)
   if (marker && !hasMarker(runtime) && session?.inTransaction?.() !== true) fail('CONTROLLED_REPLAY_ISOLATION_TRANSACTION_REQUIRED', 503)

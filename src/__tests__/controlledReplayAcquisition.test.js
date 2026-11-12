@@ -139,7 +139,7 @@ describe('inactive controlled acquisition with synthetic imported-owner witnesse
       migrationReceiptId: '8'.repeat(24), migrationTimestamp: stamp })
     for (const row of mapped.rows.evidenceSources) expect(new RuntimeEvidenceSource(row).validateSync()).toBeUndefined()
     for (const row of mapped.rows.evidenceObjects) expect(new RuntimeEvidenceObject(row).validateSync()).toBeUndefined()
-    expect(new RuntimeEvidenceObject(mapped.rows.evidenceObjects[0]).sourceType).toBe('')
+    expect(new RuntimeEvidenceObject(mapped.rows.evidenceObjects[0]).sourceType).toBe('WEBSITE')
     expect(mapped.rows.evidenceSources[0].sourceCapture).toEqual(pack.sourceRegistry[0].sourceCapture)
     expect(mapped.rows.evidenceObjects).toHaveLength(pack.evidenceObjects.length)
     expect(new Set(mapped.rows.evidenceObjects.map(row => row.evidenceObjectId)).size).toBe(pack.evidenceObjects.length)

@@ -136,8 +136,9 @@ export const controlledReplayProvenanceForRow = (row, native) => {
   const property = Object.getOwnPropertyDescriptor(row, 'controlledReplayProvenance')
   if (!property || ('value' in property && property.value === undefined)) return undefined
   requireValue(Object.hasOwn(property, 'value') && property.enumerable)
-  const descriptor = validateStoredControlledReplayProvenance(property.value,
-    native || (Object.hasOwn(row, 'runtimeInstanceId') ? row : undefined))
+  // Use the same persisted-row context for both descriptor and typed-shape checks.
+  native = native || (Object.hasOwn(row, 'runtimeInstanceId') ? row : undefined)
+  const descriptor = validateStoredControlledReplayProvenance(property.value, native)
   const conflictFields = ['adapter', 'extractionMethod', 'acquisitionMethod', 'operation', 'sourceType', 'type', 'ingestionMode']
   requireValue(conflictFields.every(key =>
     !/website-html-fetch|website_acquisition|public[ _-]?research|live[ _-]?fetch/i.test(String(row[key] || '')))

@@ -14,6 +14,7 @@ import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
 import { buildRuntimeSectionEvidenceQualifications } from '../services/runtimeSectionEvidenceQualificationService.js'
 import mongoose from 'mongoose'
 import RuntimeEvidenceSnapshot from '../models/RuntimeEvidenceSnapshot.js'
+import AuditLog from '../models/AuditLog.js'
 import { buildEvidenceMembershipBody, evidenceMaterialHash, membershipHash, EVIDENCE_MEMBERSHIP_VERSION } from '../services/runtimeEvidenceSnapshotContract.js'
 import { prepareRuntimeEvidenceSnapshot, persistRuntimeEvidenceSnapshot, readVerifiedRuntimeEvidenceSnapshot, verifyRuntimeEvidenceSnapshotDocument,
   projectPublicEvidenceSnapshotInventory } from '../services/runtimeEvidenceSnapshotService.js'
@@ -312,6 +313,10 @@ describe('future LOCK immutable evidence membership', () => {
     const audit = { _id: f.oid(10), actorUserId: f.oid(9), action: 'RUNTIME_ACTION_EXECUTED', resourceType: 'RuntimeInstance', resourceId: f.runtime._id,
       scope: { ...p.body.scope }, signatureVersion: 3, ts: new Date('2026-10-14T12:00:01.000Z'),
       diff: { actionKey: 'LOCK_RECORD', actionedAt: f.at, evidenceMembershipSnapshot: { ...p.pointer, counts: p.body.counts } } }
+    const signedAudit = new AuditLog(audit)
+    signedAudit.generateSignature()
+    expect(signedAudit.verifySignature()).toBe(true)
+    Object.assign(audit, signedAudit.toObject())
     const calls = []
     const args = { runtime: f.runtime, pointer: p.pointer, deps: { readSnapshots: async () => [doc], readAudit: async () => audit,
       readRows: async (kind, filter) => { calls.push({ kind, filter }); return f.rows[kind] } } }

@@ -870,6 +870,42 @@ describe('SS-042 bounded canonical source reads', () => {
   })
 })
 
+describe('legacy evidence snapshot recorded-membership boundary', () => {
+  const legacy = () => {
+    const runtime = makeControl({ status: 'LOCKED', framework_state: {
+      evidence_pack: { evidenceObjects: [{ evidenceObjectId: 'legacy-evidence' }], sourceRegistry: [] },
+    } })
+    delete runtime.stateVersion
+    return runtime
+  }
+  test.each([null, {}, { snapshotId: 'recorded-snapshot', membershipHash: 'a'.repeat(64) }])(
+    'rejects recorded membership %j without storage versions before legacy evidence is read', async pointer => {
+      const runtime = legacy()
+      runtime.__evidenceSnapshotControl = { pointerRecorded: true, pointer }
+      getRuntimeInstance.mockResolvedValue(runtime)
+      await expect(getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+        .rejects.toMatchObject({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED' })
+      expect(getRuntimeInstance).toHaveBeenCalledTimes(1)
+    })
+  test('rejects membership recorded between the two legacy reads', async () => {
+    const runtime = legacy()
+    getRuntimeInstance.mockResolvedValueOnce(runtime).mockResolvedValueOnce({ ...runtime,
+      __evidenceSnapshotControl: { pointerRecorded: true },
+    })
+    await expect(getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED' })
+    expect(getRuntimeInstance.mock.calls[1][0].projection).toContain('lockedEvidenceSnapshot')
+    expect(typeof getRuntimeInstance.mock.calls[1][0].internalEvidenceSnapshotToken).toBe('symbol')
+  })
+  test('preserves exact legacy evidence when no frozen membership is recorded', async () => {
+    const runtime = legacy()
+    getRuntimeInstance.mockResolvedValue(runtime)
+    await expect(getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .resolves.toEqual(runtime.framework_state.evidence_pack)
+    expect(getRuntimeInstance).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('SS-040 complete inventory with bounded section projection', () => {
   const scoped = { customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: RUNTIME_ID,
     runtimeInstanceKey: 'runtime-one', stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', current: true }

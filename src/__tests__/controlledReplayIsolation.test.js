@@ -45,8 +45,9 @@ describe('controlled replay denial marker and native orphan witness', () => {
     const native = runtime(), state = candidate(native), marker = deriveControlledReplayIsolation(native, state)
     expect(marker).toMatchObject({ classification: 'CONTROLLED_SYNTHETIC_REPLAY', runtimeInstanceKey: native.runtimeInstanceKey })
     expect(deriveControlledReplayIsolation({ ...native, controlledReplayIsolation: marker }, {})).toEqual(marker)
-    expect(controlledReplayIsolationCas(native)).toEqual({ controlledReplayIsolation: { $exists: false } })
-    expect(controlledReplayIsolationCas({ ...native, controlledReplayIsolation: marker })).toEqual({ controlledReplayIsolation: marker })
+    const identity = { _id: native._id, customerId: native.customerId, tenantId: native.tenantId, runtimeInstanceKey: native.runtimeInstanceKey }
+    expect(controlledReplayIsolationCas(native)).toEqual({ ...identity, controlledReplayIsolation: { $exists: false } })
+    expect(controlledReplayIsolationCas({ ...native, controlledReplayIsolation: marker })).toEqual({ ...identity, controlledReplayIsolation: marker })
     expect(controlledReplayIsolationAudit(native, state)).toEqual({ controlledReplayIsolation: { from: null, to: marker } })
     expect(() => controlledReplayIsolationWrite(native, state)).toThrow(expect.objectContaining({
       details: { reason: 'CONTROLLED_REPLAY_ISOLATION_TRANSACTION_REQUIRED' } }))
@@ -65,6 +66,22 @@ describe('controlled replay denial marker and native orphan witness', () => {
       row.controlledReplayProvenance.provenance.bindingDigest = storedControlledReplayBindingDigest(row.controlledReplayProvenance.binding)
     }
     expect(() => deriveControlledReplayIsolation({ ...native, controlledReplayIsolation: marker }, changed)).toThrow()
+  })
+  test('query marker validation requires explicit native identity and refuses identity edits', () => {
+    const native = runtime(), marker = deriveControlledReplayIsolation(native, candidate(native))
+    const filter = controlledReplayIsolationCas(native), update = { $set: { controlledReplayIsolation: marker } }
+    const query = (where = filter, operation = update) => RuntimeInstance.findOneAndUpdate(where, operation, { runValidators: true })
+    expect(validateControlledReplayIsolation(marker, query())).toEqual(marker)
+    for (const key of ['_id', 'customerId', 'tenantId', 'runtimeInstanceKey']) {
+      const missing = { ...filter }; delete missing[key]
+      expect(() => validateControlledReplayIsolation(marker, query(missing))).toThrow()
+      expect(() => validateControlledReplayIsolation(marker, query({ ...filter, [key]: { $eq: filter[key] } }))).toThrow()
+      for (const operation of [{ $set: { [key]: filter[key] } }, { $unset: { [key]: 1 } },
+        { $set: { [`${key}.child`]: 'x' } }, { $rename: { [key]: 'other' } }, { $rename: { other: `${key}.child` } }]) {
+        expect(() => validateControlledReplayIsolation(marker, query(filter, operation))).toThrow()
+      }
+    }
+    expect(() => validateControlledReplayIsolation({ ...marker, scope: { ...marker.scope, tenantId: 'f'.repeat(24) } }, query())).toThrow()
   })
   test('actual Mongoose update casting retains first marker and rejects raw unknown/accessor/type material', () => {
     const native = runtime(), marker = deriveControlledReplayIsolation(native, candidate(native))

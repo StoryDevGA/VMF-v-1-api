@@ -200,6 +200,7 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
 // Public evidence reads retain incompatible origin metadata only for validation.
 const RUNTIME_STATE_V2_PUBLIC_EVIDENCE_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  migrationReceiptId: 1,
   postLockOrigin: 1,
   postLockAssociation: 1,
   postLockImpactHistory: 1,
@@ -235,6 +236,8 @@ const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
 })
 
 const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
+  sourceHash: 1,
+  migrationReceiptId: 1,
   postLockOrigin: 1,
   postLockAssociation: 1,
   postLockImpactHistory: 1,
@@ -2463,11 +2466,18 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     projection: RECORDED_LOCK_CONTROL_PROJECTION, internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ,
     maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, ...metadataOptions })
   if (!identity.stateVersion && !identity.runtimeStateVersion) {
+    if (identity.__evidenceSnapshotControl?.pointerRecorded === true || identity.__evidenceSnapshotControl?.pointer) {
+      throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
+    }
     const legacy = await getRuntimeInstance({ scopes, runtimeInstanceId,
-      projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.evidence_pack`,
+      projection: `${RECORDED_LOCK_CONTROL_PROJECTION} framework_state.evidence_pack`,
+      internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ,
       maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
     if (legacy.stateVersion || legacy.runtimeStateVersion) throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED, message: 'Runtime storage identity changed.' })
+    if (legacy.__evidenceSnapshotControl?.pointerRecorded === true || legacy.__evidenceSnapshotControl?.pointer) {
+      throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
+    }
     const snapshot = legacy.framework_state?.evidence_pack || { evidenceObjects: [], sourceRegistry: [] }
     assertSerializedPayloadSize(snapshot)
     return JSON.parse(JSON.stringify(snapshot))
@@ -2553,6 +2563,16 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     if (!verifiedMembership) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
     if (controlledChild && verifiedMembership.publishedFinding !== undefined) throw createRuntimeStateError({
       code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'A successor cannot inherit the original parent finding receipt.' })
+  } else if (identity.__evidenceSnapshotControl?.pointerRecorded === true || identity.__evidenceSnapshotControl?.pointer) {
+    // An ordinary recorded lock uses the same verified membership contract.
+    // A malformed recorded pointer must not fall back to an unfrozen inventory.
+    const internal = identity.__evidenceSnapshotControl
+    if (internal.runtime?.status !== 'LOCKED' || !internal.pointer) throw createRuntimeStateError({
+      code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
+    await readVerifiedRuntimeEvidenceSnapshot({ runtime: internal.runtime, pointer: internal.pointer, session, readBudget,
+      deps: { onVerifiedMembership: proof => { verifiedMembership = proof } } })
+    if (!verifiedMembership) throw createRuntimeStateError({
+      code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
   }
   const sectionProjection = { _id: 1, sectionKey: 1, customerId: 1, tenantId: 1, runtimeInstanceId: 1,
     runtimeInstanceKey: 1, current: 1, stateVersion: 1, sourceStateVersion: 1,
