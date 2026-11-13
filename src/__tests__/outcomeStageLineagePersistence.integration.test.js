@@ -9,6 +9,7 @@ import { buildWorkingDraftStageOutputFromProviderOutput } from '../services/outc
 import { beforeAll, afterAll, describe, test, expect, jest } from '@jest/globals'
 import { randomUUID, createHash } from 'node:crypto'
 import fs from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import mongoose from 'mongoose'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import OutcomeQualityStageExecution from '../models/OutcomeQualityStageExecution.js'
@@ -34,8 +35,25 @@ const frozenProof = process.env.VMF_FROZEN_CONSUMPTION_PROOF === '1'
 const proofDirectory = process.env.VMF_FROZEN_CONSUMPTION_PROOF_DIR
 const proofDatabase = 'ss049_frozen_consumption'
 const proofTest = frozenProof ? test : test.skip
+const isProofDataDirectory = dataDir => {
+  if (!dataDir || !isAbsolute(dataDir)) return false
+  const pathFromEvidence = relative(resolve('C:/Dev/StoryLineOS/VMF-Evidence'), resolve(dataDir))
+  return Boolean(pathFromEvidence && !isAbsolute(pathFromEvidence) && pathFromEvidence !== '..'
+    && !pathFromEvidence.startsWith(`..${sep}`))
+}
+describe('provider-free frozen consumption proof directory', () => {
+  test.each([
+    ['Evidence root', 'C:/Dev/StoryLineOS/VMF-Evidence', false],
+    ['repository', 'C:/Dev/StoryLineOS/VMF-APP/dev-v1', false],
+    ['relative', 'ss-049/proof', false],
+    ['sibling prefix', 'C:/Dev/StoryLineOS/VMF-Evidence-other/proof', false],
+    ['outside drive', 'D:/proof', false],
+    ['Windows owned descendant', 'C:/Dev/StoryLineOS/VMF-Evidence/ss-049/2026-11-12-section-4-qualified-handoff/frozen-consumption-proof', process.platform === 'win32'],
+    ['root escape', 'C:/Dev/StoryLineOS/VMF-Evidence/../outside/proof', false],
+  ])('%s boundary', (_name, path, accepted) => expect(isProofDataDirectory(path)).toBe(accepted))
+})
 const assertProofOwned = () => {
-  if (!frozenProof || proofDirectory !== 'C:/Dev/StoryLineOS/VMF-Evidence/ss-049/2026-11-11-frozen-consumption-proof'
+  if (!frozenProof || !isProofDataDirectory(proofDirectory)
     || mongoose.connection.host !== '127.0.0.1' || mongoose.connection.port !== 27089
     || mongoose.connection.name !== proofDatabase) throw new Error('Owned frozen-consumption database required')
 }
@@ -44,7 +62,7 @@ const saveProof = (name, value) => {
   fs.writeFileSync(`${proofDirectory}/${name}.json`, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' })
 }
 beforeAll(async () => {
-  if (frozenProof && (proofDirectory !== 'C:/Dev/StoryLineOS/VMF-Evidence/ss-049/2026-11-11-frozen-consumption-proof'
+  if (frozenProof && (!isProofDataDirectory(proofDirectory)
     || process.env.MONGOMS_RUNTIME_DOWNLOAD !== 'false'
     || process.env.MONGOMS_SYSTEM_BINARY !== 'C:/Users/garya/.cache/mongodb-binaries/mongod-x64-win32-7.0.14.exe'
     || createHash('sha256').update(fs.readFileSync(process.env.MONGOMS_SYSTEM_BINARY)).digest('hex')

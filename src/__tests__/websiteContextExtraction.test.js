@@ -1,7 +1,7 @@
 import { jest } from '@jest/globals'
 import { readFileSync } from 'node:fs'
 import { acquireWebsiteDiscoveryEvidence, buildWebsiteDiscoveryEvidenceFromDecodedHtml, normalizeDiscoveryEvidenceObjects, buildDiscoverySourceRegistry } from '../services/discoveryIntelligenceService.js'
-import { sourceEvidenceHash, assertSourceEvidenceMetadataPairs } from '../services/sourceEvidenceContract.js'
+import { sourceEvidenceHash, assertSourceEvidenceMetadataPairs, validateEvidenceSupport, validateSourceCapture } from '../services/sourceEvidenceContract.js'
 import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
 import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
 import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
@@ -17,6 +17,62 @@ const acquire = async (html = fixture.html, profile = 'STANDARD', mode = true, s
   return acquireWebsiteDiscoveryEvidence({ websiteUrl: source.url, acquiredAt: source.capturedAt, acquisitionProfile: profile,
     ...(mode === 'OMITTED' ? {} : { recordSourceCapture: mode }) })
 }
+
+const overlappingSources = () => ['alpha', 'beta'].map(name => {
+  const url = `https://source-${name}.example/evidence`
+  const html = `<h1>Independent ${name} source</h1><p>${fixture.contexts[0]}</p>`
+  return buildWebsiteDiscoveryEvidenceFromDecodedHtml({ html, normalizedUrl: url, finalUrl: url,
+    acquisitionProfile: 'STANDARD', acquiredAt: fixture.capturedAt, recordSourceCapture: true,
+    contentTruncated: false, charactersRead: html.length, characterLimit: 320000 })
+})
+const qualifyPairs = (sourceRegistry, evidenceObjects, products) => buildRuntimeSectionEvidenceQualifications({ sourceRegistry, evidenceObjects,
+  lineageSources: products.map(product => product.source), admittedEvidenceIds: evidenceObjects.map(row => row.evidenceObjectId) })
+
+test('overlapping long excerpts retain distinct stable source identities and unverified qualifications', () => {
+  const products = overlappingSources(), replay = overlappingSources()
+  expect(products.map(product => product.source.sourceId)).toEqual(replay.map(product => product.source.sourceId))
+  expect(new Set(products.map(product => product.source.sourceId)).size).toBe(2)
+  expect(new Set(products.map(product => product.source.sourceCapture.originalContentHash)).size).toBe(2)
+  expect(new Set(products.map(product => product.source.sourceCapture.captureTextHash)).size).toBe(2)
+  const sources = products.map(product => product.source)
+  const evidenceObjects = normalizeDiscoveryEvidenceObjects({ sources, evidenceObjects: products.flatMap(product => product.evidenceObjects) })
+  const sourceRegistry = buildDiscoverySourceRegistry({ sources, sourceRegistry: products.map(product => product.sourceRegistryEntry), evidenceObjects })
+  expect(() => assertSourceEvidenceMetadataPairs({ sources: sourceRegistry, evidenceObjects })).not.toThrow()
+  const qualified = qualifyPairs(sourceRegistry, evidenceObjects, products)
+  expect(qualified.sources).toHaveLength(2)
+  expect(qualified.sources.every(row => row.sourceReview.status === 'NOT_RECORDED' && row.sourceReview.authenticity === null)).toBe(true)
+  for (const product of products) {
+    const row = qualified.evidence.find(item => item.evidenceObjectId === product.evidenceObjects[0].evidenceObjectId)
+    expect(row.reviewStatus).toBe('PENDING')
+    expect(row.evidenceSupport).toEqual(product.evidenceObjects[0].evidenceSupport)
+    expect(row.evidenceSupport).toMatchObject({ sourceId: product.source.sourceId, exactExcerpt: fixture.contexts[0],
+      epistemicType: 'SOURCE_ASSERTION', restrictions: ['EXTRACTED_TEXT_COORDINATES_ONLY', 'SOURCE_ASSERTION_NOT_INDEPENDENTLY_VERIFIED'] })
+    expect(row.evidenceSupport.end - row.evidenceSupport.start).toBe(fixture.contexts[0].length)
+    expect(product.evidenceObjects[0].sourceUrl).toBe(product.source.url)
+  }
+  expect(globalThis.fetch).not.toHaveBeenCalled()
+  expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).not.toHaveBeenCalled()
+})
+
+test.each(['support', 'capture'])('retagging another valid source %s cannot transfer overlapping excerpt authority', kind => {
+  const products = overlappingSources(), sources = products.map(product => product.source)
+  const evidenceObjects = normalizeDiscoveryEvidenceObjects({ sources, evidenceObjects: products.flatMap(product => product.evidenceObjects) })
+  const sourceRegistry = buildDiscoverySourceRegistry({ sources, sourceRegistry: products.map(product => product.sourceRegistryEntry), evidenceObjects })
+  const target = evidenceObjects.find(row => row.sourceId === sources[1].sourceId)
+  if (kind === 'support') {
+    target.evidenceSupport = { ...products[0].evidenceObjects[0].evidenceSupport, sourceId: target.sourceId }
+    expect(() => validateEvidenceSupport(target.evidenceSupport, { sourceId: target.sourceId })).not.toThrow()
+  } else {
+    const source = sourceRegistry.find(row => row.sourceId === target.sourceId)
+    source.sourceCapture = { ...products[0].source.sourceCapture, sourceId: target.sourceId }
+    source.contentHash = products[0].source.contentHash
+    expect(() => validateSourceCapture(source.sourceCapture, { sourceId: target.sourceId, contentHash: source.contentHash })).not.toThrow()
+  }
+  expect(() => assertSourceEvidenceMetadataPairs({ sources: sourceRegistry, evidenceObjects }))
+    .toThrow(expect.objectContaining({ code: 'SOURCE_EVIDENCE_CONTRACT_INVALID' }))
+  expect(() => qualifyPairs(sourceRegistry, evidenceObjects, products))
+    .toThrow(expect.objectContaining({ code: 'SOURCE_EVIDENCE_CONTRACT_INVALID' }))
+})
 test('complete three golden contexts preserve decimals and every source qualification', async () => {
   const result = await acquire()
   expect(fixture.html.length).toBeGreaterThanOrEqual(8000)

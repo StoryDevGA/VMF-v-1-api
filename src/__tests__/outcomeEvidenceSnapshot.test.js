@@ -592,19 +592,25 @@ describe('Outcome frozen context and supplemental metadata transport (offline st
 
 describe('offline captured website material through membership and Outcome inventory', () => {
   const captureFixture = JSON.parse(readFileSync(new URL('./fixtures/controlledWebsiteCapture.json', import.meta.url), 'utf8'))
-  const pipeline = async (recordSourceCapture = true) => {
+  const pipeline = async (recordSourceCapture = true, crossSource = false) => {
     const originalFetch = globalThis.fetch, originalDns = globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__
-    let product
+    const products = []
     try {
       globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = jest.fn(async () => [{ address: '93.184.216.34', family: 4 }])
-      globalThis.fetch = jest.fn(async () => ({ ok: true, status: 200, url: captureFixture.url,
-        headers: { get: key => key === 'content-type' ? 'text/html' : key === 'content-length' ? String(Buffer.byteLength(captureFixture.html)) : null }, text: async () => captureFixture.html }))
-      product = await acquireWebsiteDiscoveryEvidence({ websiteUrl: captureFixture.url, acquiredAt: captureFixture.capturedAt,
-        acquisitionProfile: 'STANDARD', recordSourceCapture })
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+      const inputs = [captureFixture, ...(crossSource ? [{ ...captureFixture, url: 'https://independent-source.example/evidence',
+        html: '<h1>Independent source boundary</h1>' + captureFixture.html }] : [])]
+      globalThis.fetch = jest.fn(async url => {
+        const input = inputs.find(row => row.url === url)
+        return { ok: true, status: 200, url: input.url,
+          headers: { get: key => key === 'content-type' ? 'text/html' : key === 'content-length' ? String(Buffer.byteLength(input.html)) : null }, text: async () => input.html }
+      })
+      for (const input of inputs) products.push(await acquireWebsiteDiscoveryEvidence({ websiteUrl: input.url, acquiredAt: input.capturedAt,
+        acquisitionProfile: 'STANDARD', recordSourceCapture }))
+      expect(globalThis.fetch).toHaveBeenCalledTimes(inputs.length)
     } finally { globalThis.fetch = originalFetch; globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDns }
-    const evidenceObjects = normalizeDiscoveryEvidenceObjects({ sources: [product.source], evidenceObjects: product.evidenceObjects })
-    const sourceRegistry = buildDiscoverySourceRegistry({ sources: [product.source], sourceRegistry: [product.sourceRegistryEntry], evidenceObjects })
+    const product = products[0], sources = products.map(item => item.source)
+    const evidenceObjects = normalizeDiscoveryEvidenceObjects({ sources, evidenceObjects: products.flatMap(item => item.evidenceObjects) })
+    const sourceRegistry = buildDiscoverySourceRegistry({ sources, sourceRegistry: products.map(item => item.sourceRegistryEntry), evidenceObjects })
     const f = membershipFixture()
     const mapped = createRuntimeStateLegacySourceRowSet({ scope: { runtimeInstanceId: f.runtime._id, runtimeInstanceKey: f.runtime.runtimeInstanceKey,
       customerId: f.runtime.customerId, tenantId: f.runtime.tenantId }, stateVersion: f.runtime.stateVersion,
@@ -619,13 +625,13 @@ describe('offline captured website material through membership and Outcome inven
     f.rows.evidence = modelRows(RuntimeEvidenceObject, mapped.rows.evidenceObjects, 30)
     // Reused LOCKED/accepted-section shapes are synthetic reference containers,
     // not a native lock, accepted website evidence, or reviewer authority.
-    const sourceId = product.source.sourceId
-    f.rows.sections[0].sectionDetail.accepted = { evidenceRefs: [sourceId], supportingEvidenceRefs: [sourceId] }
+    const sourceIds = products.map(item => item.source.sourceId)
+    f.rows.sections[0].sectionDetail.accepted = { evidenceRefs: sourceIds, supportingEvidenceRefs: sourceIds }
     const bodyNow = () => buildEvidenceMembershipBody({ runtime: f.runtime, lockTruthRecord: f.runtime.framework_state.lock.snapshot, ...f.rows })
     const body = bodyNow(), member = body.sections[0]
     const args = { scope: { customerId: String(f.runtime.customerId), tenantId: String(f.runtime.tenantId), runtimeInstanceId: String(f.runtime._id),
       runtimeInstanceKey: f.runtime.runtimeInstanceKey, stateVersion: f.runtime.stateVersion },
-    sections: [{ sectionKey: member.sectionKey, references: [sourceId], storageId: member.storageId, materialHash: member.materialHash }],
+    sections: [{ sectionKey: member.sectionKey, references: sourceIds, storageId: member.storageId, materialHash: member.materialHash }],
     frozenMembership: { snapshotId: 'evidence_snapshot_123e4567-e89b-42d3-a456-426614174000', membershipHash: membershipHash(body), body },
     count: async kind => f.rows[kind].length, readPage: async (kind, after) => after ? [] : f.rows[kind],
     validateRows: (kind, page) => {
@@ -639,8 +645,65 @@ describe('offline captured website material through membership and Outcome inven
       const result = await assembleOutcomeEvidenceInventory(args)
       return { ...result, inventoryReceipt: result.receipt }
     }
-    return { ...f, product, body, bodyNow, args, inventory }
+    return { ...f, product, products, body, bodyNow, args, inventory }
   }
+  test('two overlapping captured sources preserve origin, spans and qualifications across mapped frozen inventory', async () => {
+    const f = await pipeline(true, true), snapshot = await f.inventory()
+    expect(() => assertOutcomeEvidenceInventory(snapshot)).not.toThrow()
+    expect(snapshot.sourceRegistry).toHaveLength(2)
+    expect(new Set(snapshot.sourceRegistry.map(row => row.sourceCapture.captureTextHash)).size).toBe(2)
+    const qualified = buildRuntimeSectionEvidenceQualifications({ evidenceObjects: snapshot.evidenceObjects, sourceRegistry: snapshot.sourceRegistry,
+      lineageSources: f.products.map(item => item.source), admittedEvidenceIds: snapshot.receipt.selectedEvidenceIds })
+    expect(qualified.sources.every(row => row.sourceReview.status === 'NOT_RECORDED' && row.sourceReview.authenticity === null)).toBe(true)
+    for (const product of f.products) {
+      const source = snapshot.sourceRegistry.find(row => row.sourceId === product.source.sourceId)
+      expect(source.sourceCapture).toEqual(product.source.sourceCapture)
+      expect(source.contentHash).toBe(product.source.contentHash)
+      expect(source.sourceRef).toBe(product.source.url)
+      for (const original of product.evidenceObjects) {
+        const row = snapshot.evidenceObjects.find(item => item.evidenceObjectId === original.evidenceObjectId)
+        expect(row.extractedFact).toBe(original.extractedFact)
+        expect(row.sourceId).toBe(product.source.sourceId)
+        expect(row.evidenceSupport).toEqual(original.evidenceSupport)
+        expect(row.reviewStatus).toBe('PENDING')
+        if (row.evidenceSupport) expect(row.evidenceSupport.epistemicType).toBe('SOURCE_ASSERTION')
+        expect(f.body.evidence.find(item => item.evidenceObjectId === row.evidenceObjectId).materialHash).toBe(evidenceMaterialHash(row))
+      }
+    }
+    const sharedExcerpt = f.products[0].evidenceObjects[0].evidenceSupport.exactExcerpt
+    for (const product of f.products) {
+      const matches = snapshot.evidenceObjects.filter(row => row.sourceId === product.source.sourceId
+        && row.evidenceSupport?.exactExcerpt === sharedExcerpt)
+      expect(matches).toHaveLength(1)
+      expect(matches[0].evidenceObjectId).toBe(product.evidenceObjects.find(row => row.evidenceSupport?.exactExcerpt === sharedExcerpt).evidenceObjectId)
+    }
+  })
+  test('mapped inventory refuses borrowed support despite an identical excerpt on another captured source', async () => {
+    const f = await pipeline(true, true)
+    const donor = f.rows.evidence.find(row => row.evidenceObjectId === f.products[0].evidenceObjects[0].evidenceObjectId)
+    const target = f.rows.evidence.find(row => row.sourceId === f.products[1].source.sourceId
+      && row.evidenceSupport?.exactExcerpt === donor.evidenceSupport.exactExcerpt)
+    expect(donor.evidenceSupport.exactExcerpt).toBe(target.evidenceSupport.exactExcerpt)
+    target.evidenceSupport = { ...donor.evidenceSupport, sourceId: target.sourceId }
+    expect(new RuntimeEvidenceObject(target).validateSync()).toBeUndefined()
+    await expect(f.inventory()).rejects.toMatchObject({ code: 'OUTCOME_EVIDENCE_SNAPSHOT_SOURCE_EVIDENCE_CONTRACT_INVALID' })
+    expect(() => buildRuntimeSectionEvidenceQualifications({ evidenceObjects: f.rows.evidence, sourceRegistry: f.rows.sources,
+      lineageSources: f.products.map(item => item.source), admittedEvidenceIds: f.rows.evidence.map(row => row.evidenceObjectId) }))
+      .toThrow(expect.objectContaining({ code: 'SOURCE_EVIDENCE_CONTRACT_INVALID' }))
+  })
+  test.each(['capture time', 'qualification'])('valid second-source %s drift cannot reuse the frozen binding', async kind => {
+    const f = await pipeline(true, true), original = await f.inventory(), frozenHash = membershipHash(f.body)
+    const sourceId = f.products[1].source.sourceId
+    if (kind === 'capture time') f.rows.sources.find(row => row.sourceId === sourceId).sourceCapture.capturedAt = '2026-10-19T10:01:00.000Z'
+    else f.rows.evidence.find(row => row.sourceId === sourceId).confidence.score = 1
+    for (const row of f.rows.sources) expect(new RuntimeEvidenceSource(row).validateSync()).toBeUndefined()
+    for (const row of f.rows.evidence) expect(new RuntimeEvidenceObject(row).validateSync()).toBeUndefined()
+    expect(membershipHash(f.body)).toBe(frozenHash)
+    expect(membershipHash(f.bodyNow())).not.toBe(frozenHash)
+    const changed = await f.inventory()
+    expect(changed.receipt.overallHash).not.toBe(original.receipt.overallHash)
+    expect(() => assertOutcomeEvidenceInventory(changed)).toThrow(expect.objectContaining({ code: 'OUTCOME_EVIDENCE_SNAPSHOT_FROZEN_CONTEXT_INVALID' }))
+  })
   test('actual captured pairs preserve deterministic body/inventory hashes and unverified qualifications', async () => {
     const f = await pipeline(), snapshot = await f.inventory(), replay = await pipeline()
     expect(() => assertOutcomeEvidenceInventory(snapshot)).not.toThrow()
