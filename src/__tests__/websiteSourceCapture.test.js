@@ -45,6 +45,89 @@ beforeEach(() => {
 })
 afterEach(() => { globalThis.fetch = originalFetch; globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDns })
 
+describe('provider-free manual redirect capture boundary', () => {
+  const redirect = location => response('<p>Redirect body is not original evidence.</p>', { ok: false, status: 302,
+    headers: { get: key => key === 'location' ? location : null } })
+  const capture = () => acquireWebsiteDiscoveryEvidence({ websiteUrl: fixture.url, acquiredAt: fixture.capturedAt,
+    acquisitionProfile: 'STANDARD', recordSourceCapture: true })
+
+  test('same-domain relative redirect captures only the final original body and its support', async () => {
+    const moved = redirect('/final'), finalUrl = new URL('/final', fixture.url).toString(), final = response(fixture.html, { url: finalUrl })
+    globalThis.fetch.mockResolvedValueOnce(moved).mockResolvedValueOnce(final)
+    const product = await capture()
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(1, fixture.url, expect.objectContaining({ redirect: 'manual' }))
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(2, finalUrl, expect.objectContaining({ redirect: 'manual' }))
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(3)
+    expect(moved.text).not.toHaveBeenCalled()
+    expect(final.text).toHaveBeenCalledTimes(1)
+    expect(product.source.finalUrl).toBe(finalUrl)
+    expect(product.source.sourceCapture.originalContentHash).toBe(hash(fixture.html))
+    expect(product.source.sourceCapture.captureTextHash).toBe(hash(fixture.captureText))
+    expect(() => assertSourceEvidenceMetadataPairs({ sources: [product.source], evidenceObjects: product.evidenceObjects })).not.toThrow()
+    expect(product.evidenceObjects.some(row => row.evidenceSupport)).toBe(true)
+    for (const row of product.evidenceObjects) {
+      expect(row.reviewStatus).toBe('PENDING')
+      expect(row.extractedFact).not.toContain('Redirect body')
+      if (row.evidenceSupport) {
+        expect(row.evidenceSupport.exactExcerpt).toBe(fixture.captureText.slice(row.evidenceSupport.start, row.evidenceSupport.end))
+        expect(row.evidenceSupport.epistemicType).toBe('SOURCE_ASSERTION')
+      }
+    }
+  })
+
+  test.each(['https://foreign.example/private', 'http://127.0.0.1/private'])('redirect to %s stops before target DNS or fetch', async location => {
+    const moved = redirect(location)
+    globalThis.fetch.mockResolvedValueOnce(moved)
+    await expect(capture()).rejects.toThrow('Website acquisition redirected outside the requested domain.')
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(1)
+    expect(moved.text).not.toHaveBeenCalled()
+  })
+
+  test.each(['redirect target', 'next fetch'])('public DNS changing to private at %s stops before another fetch', async point => {
+    const moved = redirect('/final'), publicAddress = [{ address: '93.184.216.34', family: 4 }]
+    globalThis.fetch.mockResolvedValueOnce(moved)
+    globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__.mockReset().mockResolvedValueOnce(publicAddress)
+    if (point === 'next fetch') globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__.mockResolvedValueOnce(publicAddress)
+    globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__.mockResolvedValueOnce([{ address: '10.0.0.5', family: 4 }])
+    await expect(capture()).rejects.toThrow('Website acquisition target must remain a publicly accessible domain.')
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(point === 'next fetch' ? 3 : 2)
+    expect(moved.text).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['mixed public/private', [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.5', family: 4 }], 'Website acquisition target must remain a publicly accessible domain.'],
+    ['empty', [], 'Website acquisition could not verify public DNS resolution.'],
+  ])('%s DNS refuses capture before any fetch', async (_name, records, message) => {
+    globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__.mockResolvedValueOnce(records)
+    await expect(capture()).rejects.toThrow(message)
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(1)
+  })
+
+  test('missing redirect location fails without reading its body or fetching again', async () => {
+    const moved = redirect(null)
+    globalThis.fetch.mockResolvedValueOnce(moved)
+    await expect(capture()).rejects.toThrow('Website acquisition redirect was missing a target location.')
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(1)
+    expect(moved.text).not.toHaveBeenCalled()
+  })
+
+  test('redirect budget stops after four fetches without a fifth fetch or consuming redirect bodies', async () => {
+    const redirects = Array.from({ length: 4 }, (_, index) => redirect(`/hop-${index + 1}`))
+    for (const moved of redirects) globalThis.fetch.mockResolvedValueOnce(moved)
+    await expect(capture()).rejects.toThrow('Website acquisition exceeded the supported redirect limit.')
+    expect(globalThis.fetch).toHaveBeenCalledTimes(4)
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(8)
+    expect(globalThis.fetch.mock.calls.map(([url]) => url)).toEqual([fixture.url, ...[1, 2, 3].map(index => new URL(`/hop-${index}`, fixture.url).toString())])
+    for (const [, options] of globalThis.fetch.mock.calls) expect(options.redirect).toBe('manual')
+    for (const moved of redirects) expect(moved.text).not.toHaveBeenCalled()
+  })
+})
+
 test('records actual complete decoded-response and full stripped-view hashes, preserving UTF16 coordinates and legacy identities', async () => {
   const result = await acquire(), capture = result.source.sourceCapture
   expect(fixture.fixtureKind).toBe('CONTROLLED_SYNTHETIC_WEBSITE_RESPONSE')
