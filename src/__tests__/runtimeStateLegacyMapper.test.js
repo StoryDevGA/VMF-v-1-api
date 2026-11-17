@@ -289,6 +289,7 @@ test('maps an actual rejected discovery decision without inventing materiality o
     evidenceObjects: [original],
     reviewStatus: 'REJECTED',
     reviewedAt: migrationTimestamp,
+    rationale: 'The original source does not support this interpretation.',
   })
   expect(reviewed.found).toBe(true)
   legacy.evidencePack.evidenceObjects = reviewed.evidenceObjects
@@ -297,8 +298,25 @@ test('maps an actual rejected discovery decision without inventing materiality o
   expect(rows[0]).toMatchObject({
     evidenceObjectId: 'evidence-1', sourceId: 'source-1', extractedFact: 'Fact',
     reviewStatus: 'REJECTED', validationStatus: 'REJECTED',
+    reviewRationale: 'The original source does not support this interpretation.',
+    rejectedBy: '64b7f7a4e1e5f8320c000005', rejectionTimestamp: migrationTimestamp,
     materiality: 'UNKNOWN', materialityScore: null,
   })
+})
+
+test('a new disposition replaces its rationale and cannot inherit a previous decision reason', () => {
+  const original = makeLegacy().evidencePack.evidenceObjects[0]
+  const args = { actorUserId: '64b7f7a4e1e5f8320c000005', evidenceObjectId: original.evidenceObjectId, reviewedAt: migrationTimestamp }
+  const accepted = applyDiscoveryEvidenceReview({ ...args, evidenceObjects: [original], reviewStatus: 'ACCEPTED',
+    rationale: 'The exact original passage supports the recorded assertion.' }).evidenceObjects
+  expect(accepted[0].reviewRationale).toBe('The exact original passage supports the recorded assertion.')
+  const rejected = applyDiscoveryEvidenceReview({ ...args, evidenceObjects: accepted, reviewStatus: 'REJECTED' }).evidenceObjects
+  expect(rejected[0]).not.toHaveProperty('reviewRationale')
+  const reopened = applyDiscoveryEvidenceReview({ ...args, evidenceObjects: accepted, reviewStatus: 'PENDING',
+    rationale: 'This reason cannot survive a pending disposition.' }).evidenceObjects
+  expect(reopened[0]).not.toHaveProperty('reviewRationale')
+  expect(original).not.toHaveProperty('reviewRationale')
+  expect(reopened[0].extractedFact).toBe(accepted[0].extractedFact)
 })
 
 test.each([['UNKNOWN', undefined], ['UNKNOWN', 0], ['MATERIAL', 0]])(

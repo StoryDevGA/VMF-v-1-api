@@ -45,5 +45,35 @@
       "profileLocator": "https://registry.fixture.example/company/00123456"
     }]
   },
-  "originalFixture": "controlledWebsiteCapture.json"
+  "originalFixture": "controlledWebsiteCapture.json",
+  "providerShapes": {
+    "classification": "SYNTHETIC_DOCUMENTED_RESPONSE_SHAPES_NOT_PROVIDER_GENERATED",
+    "brave": {
+      "type": "search",
+      "query": { "original": "site:controlled-capture.example", "more_results_available": false },
+      "web": { "type": "search", "results": [{ "title": "Synthetic proposed source result", "url": "https://controlled-capture.example/", "description": "Synthetic search description, not original evidence.", "age": "1 day ago" }] },
+      "extra": { "ignoredSyntheticMetadata": true }
+    },
+    "companiesHouse": {
+      "company_number": "00123456",
+      "company_name": "Synthetic Child Limited",
+      "links": { "self": "/company/00123456" },
+      "jurisdiction": "england-wales",
+      "company_status": "active",
+      "date_of_creation": "2020-01-01"
+    },
+    "tavily": {
+      "query": "site:controlled-capture.example workflow monitoring",
+      "request_id": "synthetic-tavily-request-1",
+      "results": [{ "title": "Synthetic Tavily-shaped discovery result", "url": "https://controlled-capture.example/", "content": "Synthetic search content asserts 99.9 percent improvement; not original evidence.", "score": 0.8, "raw_content": null }],
+      "answer": null,
+      "response_time": "1.67",
+      "usage": { "credits": 1 },
+      "auto_parameters": { "topic": "general", "search_depth": "basic" }
+    }
+  },
+  "legacyProviderOutputHashes": {
+    "brave": "237e75404843436ff71c232322d9140091f29b42639ce6b99cb12c2cdf5ebe7c",
+    "companiesHouse": "ab84cdee166d310fca7da3f4d8292d8c4f7678ea213cc05b3ac3c73932255fb0"
+  }
 }

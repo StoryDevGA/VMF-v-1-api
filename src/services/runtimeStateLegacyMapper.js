@@ -388,6 +388,12 @@ const mapEvidence = ({ manifest, common, sourceIds, sources }) => {
       truthHash,
       lineageHash,
     }
+    for (const field of ['reviewRationale', 'acceptedBy', 'acceptanceTimestamp', 'rejectedBy', 'rejectionTimestamp']) {
+      if (!hasOwn(value, field)) continue
+      const recorded = ownString(value, [field])
+      if (recorded === null) inputFailure('Evidence decision metadata is invalid.')
+      row[field] = recorded
+    }
     const qualified = preserveEvidenceDraftQualification(value, row)
     assertControlledReplayProvenancePairs({ sources: [sources.get(sourceId)], evidenceObjects: [qualified], native: common })
     assertEvidenceDraftQualification({ evidence: qualified, source: sources.get(sourceId) })

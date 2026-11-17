@@ -916,7 +916,17 @@ export const decodeDocumentBuffer = (documentSource = {}) => {
   }
 }
 
-const decodeHtmlEntities = (value) => String(value ?? '')
+const decodeHtmlEntities = (value, numeric = false) => numeric
+  ? String(value ?? '').replace(/&(?:nbsp|amp|quot|apos|lt|gt|#\d+|#x[0-9a-f]+);/gi, entity => {
+    const named = { nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
+    const token = entity.slice(1, -1).toLowerCase()
+    if (Object.hasOwn(named, token)) return named[token]
+    const point = token.startsWith('#x') ? Number.parseInt(token.slice(2), 16) : Number(token.slice(1))
+    return Number.isSafeInteger(point) && point >= 32 && point <= 0x10ffff
+      && !(point >= 0x7f && point <= 0x9f) && !(point >= 0xd800 && point <= 0xdfff)
+      ? String.fromCodePoint(point) : entity
+  })
+  : String(value ?? '')
   .replace(/&nbsp;/gi, ' ')
   .replace(/&amp;/gi, '&')
   .replace(/&quot;/gi, '"')
@@ -925,11 +935,11 @@ const decodeHtmlEntities = (value) => String(value ?? '')
   .replace(/&lt;/gi, '<')
   .replace(/&gt;/gi, '>')
 
-const stripHtmlToText = (value) => decodeHtmlEntities(String(value ?? '')
+const stripHtmlToText = (value, numeric = false) => decodeHtmlEntities(String(value ?? '')
   .replace(/<script[\s\S]*?<\/script>/gi, ' ')
   .replace(/<style[\s\S]*?<\/style>/gi, ' ')
   .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-  .replace(/<[^>]+>/g, ' '))
+  .replace(/<[^>]+>/g, ' '), numeric)
 
 const normalizeWebsiteHostname = (hostname) =>
   String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/^www\./, '')
@@ -1064,10 +1074,12 @@ const assertWebsiteAcquisitionActive = (signal) => {
   if (signal?.aborted) throw new Error('Website acquisition timed out.')
 }
 
-const readWebsiteResponseText = async (response, { signal } = {}) => {
+const researchWebsiteObservations = new WeakMap()
+const readWebsiteResponseText = async (response, { signal, maxResponseBytes, onProgress } = {}) => {
   assertWebsiteAcquisitionActive(signal)
   const maxCharacters = WEBSITE_ACQUISITION_LIMITS.maxContentCharacters
   if (!response?.body?.getReader) {
+    if (maxResponseBytes !== undefined) throw new Error('Bounded research requires a streamed website response.')
     const contentLength = Number(response?.headers?.get?.('content-length'))
     if (!Number.isFinite(contentLength) || contentLength > maxCharacters) {
       throw new Error('Website acquisition response exceeds the supported size limit.')
@@ -1086,6 +1098,7 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
   const decoder = new TextDecoder()
   let text = ''
   let truncated = false
+  let bytesRead = 0
   const cancelOnAbort = () => {
     try {
       Promise.resolve(reader.cancel?.()).catch(() => {})
@@ -1101,15 +1114,26 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
       const { done, value } = await reader.read()
       assertWebsiteAcquisitionActive(signal)
       if (done) break
+      if (maxResponseBytes !== undefined) {
+        if (!(value instanceof Uint8Array)) throw new Error('Website response is not a byte stream.')
+        bytesRead += value.byteLength
+        onProgress?.({ responseText: text, bytesRead })
+        if (bytesRead > maxResponseBytes) {
+          cancelOnAbort()
+          throw new Error('Website response exceeded its research byte limit.')
+        }
+      }
       const decodedChunk = decoder.decode(value, { stream: true })
       const remainingCharacters = maxCharacters - text.length
       if (decodedChunk.length > remainingCharacters) {
         text += decodedChunk.slice(0, Math.max(0, remainingCharacters))
+        onProgress?.({ responseText: text, bytesRead })
         truncated = true
         await reader.cancel?.()
         break
       }
       text += decodedChunk
+      onProgress?.({ responseText: text, bytesRead })
       if (text.length >= maxCharacters) {
         truncated = true
         await reader.cancel?.()
@@ -1131,17 +1155,23 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
       truncated,
       characterLimit: maxCharacters,
       charactersRead: text.length,
+      ...(maxResponseBytes !== undefined ? { bytesRead } : {}),
     }
+  } catch (error) {
+    if (maxResponseBytes === undefined) throw error
+    const safe = new Error('Website research response could not be completely captured.')
+    researchWebsiteObservations.set(safe, { responseText: text, bytesRead, limitExceeded: bytesRead > maxResponseBytes })
+    throw safe
   } finally {
     signal?.removeEventListener('abort', cancelOnAbort)
     reader.releaseLock?.()
   }
 }
 
-const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal }) => {
+const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal, maxRedirects = WEBSITE_ACQUISITION_LIMITS.maxRedirects }) => {
   let currentUrl = normalizedUrl
 
-  for (let redirectCount = 0; redirectCount <= WEBSITE_ACQUISITION_LIMITS.maxRedirects; redirectCount += 1) {
+  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
     assertWebsiteAcquisitionActive(signal)
     const currentParsedUrl = new URL(currentUrl)
     await assertWebsiteResolvesPublicly(currentParsedUrl.hostname)
@@ -1166,6 +1196,7 @@ const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal }) => {
     assertWebsiteAcquisitionActive(signal)
     const status = Number(response?.status)
     if (status >= 300 && status < 400) {
+      if (maxRedirects === 0) throw new Error('Website acquisition exceeded its redirect limit.')
       const location = response.headers?.get?.('location')
       if (!location) {
         throw new Error('Website acquisition redirect was missing a target location.')
@@ -1189,14 +1220,73 @@ const extractHtmlMatch = (html, pattern) => {
   return sanitizeFact(stripHtmlToText(match?.[1] || ''))
 }
 
-const extractLongWebsiteContexts = (html, captureText, profileLimits) => {
+const websiteMetaDescription = (tag) => {
+  const name = tag.match(/\sname\s*=\s*(["'])([\s\S]*?)\1/i)
+  const content = tag.match(/\scontent\s*=\s*(["'])([\s\S]*?)\1/i)
+  return name?.[2].toLowerCase() === 'description' && content
+    ? content[2] : undefined
+}
+
+// Retain source-authored metadata in future ordinary captures, at its tag position.
+const ordinaryWebsiteCaptureText = (html) => stripHtmlToText(html.replace(/<meta\b[^>]*>/gi, tag => {
+  const description = websiteMetaDescription(tag)
+  return description === undefined ? tag : ` ${description} `
+}), true)
+
+// Preserve adjacent paragraph context; include its heading only when no layout
+// boundary separates it from the first paragraph.
+const ordinaryWebsiteSectionContexts = html => {
+  const groups = []
+  let heading = null, group = null
+  for (const match of html.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>|<\/?h[1-6]\b[^>]*>|<p\b[^>]*>[\s\S]*?<\/p\s*>/gi)) {
+    if (/^<\/?h/i.test(match[0])) {
+      heading = match[1] && Number(match[1]) <= 3 && !/<\/?h[1-6]\b/i.test(match[2])
+        ? { start: match.index, end: match.index + match[0].length } : null
+      group = null
+      continue
+    }
+    const paragraph = match[0].replace(/^<p\b[^>]*>|<\/p\s*>$/gi, '')
+    if (!heading || !isGovernedDiscoveryEvidenceFact(stripHtmlToText(paragraph, true))) {
+      group = null
+      continue
+    }
+    const gap = html.slice(group?.end ?? heading.end, match.index)
+    if ((group && gap.trim()) || (!group && (/<\/?(?:section|article|table|ul|ol|blockquote)\b/i.test(gap)
+      || stripHtmlToText(gap, true).trim()))) {
+      heading = null
+      group = null
+      continue
+    }
+    if (!group) {
+      const start = /<\/?(?!span\b|b\b|strong\b|em\b|i\b|a\b|small\b|s\b|u\b|br\b)[a-z][^>]*>/i.test(gap)
+        ? match.index : heading.start
+      group = { start, end: match.index + match[0].length, paragraphs: 0, hasShortParagraph: false, unsupported: false }
+      groups.push(group)
+    }
+    group.paragraphs += 1
+    group.hasShortParagraph ||= sanitizeFact(stripHtmlToText(paragraph, true)).length <= 260
+    group.end = match.index + match[0].length
+    group.unsupported ||= /<\/?(?:p|div|section|article|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|h[1-6])\b/i.test(paragraph)
+  }
+  return groups.filter(group => group.paragraphs >= 2 && group.hasShortParagraph).map(group => {
+    const exactSegment = stripHtmlToText(html.slice(group.start, group.end), true).trim()
+    return { kind: 'body', text: sanitizeFact(exactSegment), exactSegment, unsupported: group.unsupported,
+      sourceStart: group.start, sourceEnd: group.end }
+  }).filter(segment => segment.text.length > 260)
+}
+
+const extractLongWebsiteContexts = (html, captureText, profileLimits, ordinary = false) => {
   const visible = html.replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
   const seen = new Set()
-  const contexts = Array.from(visible.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi))
-    .map(match => ({ kind: 'body', text: sanitizeFact(stripHtmlToText(match[1])), exactSegment: stripHtmlToText(match[1]),
+  const sections = ordinary ? ordinaryWebsiteSectionContexts(visible) : []
+  const longParagraphs = Array.from(visible.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi))
+    .filter(match => !sections.some(section => match.index >= section.sourceStart
+      && match.index + match[0].length <= section.sourceEnd))
+    .map(match => ({ kind: 'body', text: sanitizeFact(stripHtmlToText(match[1], ordinary)), exactSegment: stripHtmlToText(match[1], ordinary),
       unsupported: /<\/?(?:p|div|section|article|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|h[1-6])\b/i.test(match[1]) }))
     .filter(segment => segment.text.length > 260 && isGovernedDiscoveryEvidenceFact(segment.text))
+  const contexts = [...sections, ...longParagraphs]
     .filter(segment => {
       const key = segment.text.toLowerCase()
       if (seen.has(key)) return false
@@ -1204,6 +1294,8 @@ const extractLongWebsiteContexts = (html, captureText, profileLimits) => {
     }).slice(0, profileLimits.maxCandidateSegments)
   const ranges = contexts.slice(0, profileLimits.maxEvidenceObjects).map(segment => {
     if (segment.unsupported) throw new Error('Website contextual extraction cannot select nested paragraph structure.')
+    if (ordinary && segment.text.length + 'Website body: '.length > 8000)
+      throw new Error('Website contextual extraction exceeds the supported fact size.')
     const start = captureText.indexOf(segment.exactSegment)
     if (start < 0 || captureText.indexOf(segment.exactSegment, start + 1) !== -1) {
       throw new Error('Website contextual extraction requires a unique exact capture paragraph.')
@@ -1217,11 +1309,17 @@ const extractLongWebsiteContexts = (html, captureText, profileLimits) => {
   return { contexts, bodyText }
 }
 
-const extractHtmlSegments = (html, { acquisitionProfile, recordSourceCapture = false } = {}) => {
+const extractHtmlSegments = (html, { acquisitionProfile, recordSourceCapture = false, captureText: recordedCaptureText } = {}) => {
   const sourceHtml = String(html || '')
+  const ordinary = recordedCaptureText !== undefined
+  const textOf = value => stripHtmlToText(value, ordinary)
   const profileLimits = getWebsiteAcquisitionProfileLimits(acquisitionProfile)
-  const title = extractHtmlMatch(sourceHtml, /<title[^>]*>([\s\S]*?)<\/title>/i)
-  const description = extractHtmlMatch(
+  const title = ordinary ? sanitizeFact(textOf(sourceHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || ''))
+    : extractHtmlMatch(sourceHtml, /<title[^>]*>([\s\S]*?)<\/title>/i)
+  const rawDescription = recordedCaptureText === undefined ? undefined
+    : Array.from(sourceHtml.matchAll(/<meta\b[^>]*>/gi)).map(match => websiteMetaDescription(match[0])).find(Boolean)
+  const descriptionText = rawDescription === undefined ? undefined : textOf(rawDescription).trim()
+  const description = recordedCaptureText !== undefined ? sanitizeFact(descriptionText) : extractHtmlMatch(
     sourceHtml,
     /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
   ) || extractHtmlMatch(
@@ -1229,10 +1327,14 @@ const extractHtmlSegments = (html, { acquisitionProfile, recordSourceCapture = f
     /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["'][^>]*>/i,
   )
   const headingMatches = Array.from(sourceHtml.matchAll(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/gi))
-    .map((match) => sanitizeFact(stripHtmlToText(match[1])))
-  const captureText = stripHtmlToText(sourceHtml)
-  const { contexts, bodyText } = recordSourceCapture
-    ? extractLongWebsiteContexts(sourceHtml, captureText, profileLimits) : { contexts: [], bodyText: captureText }
+    .map((match) => ({ kind: 'heading', text: sanitizeFact(textOf(match[1])),
+      ...(ordinary ? { supportText: textOf(match[1]).trim() } : {}) }))
+  const captureText = recordedCaptureText ?? stripHtmlToText(sourceHtml)
+  const { contexts, bodyText: remainingText } = recordSourceCapture
+    ? extractLongWebsiteContexts(sourceHtml, captureText, profileLimits, ordinary) : { contexts: [], bodyText: captureText }
+  const bodyText = recordedCaptureText === undefined ? remainingText
+    : contexts.slice(0, profileLimits.maxEvidenceObjects).reduce((text, segment) =>
+      text.replace(segment.exactSegment, '\n'.repeat(segment.exactSegment.length)), textOf(sourceHtml))
   const bodySegments = bodyText
     .split(/[.!?\n\r]+/)
     .map(sanitizeFact)
@@ -1241,9 +1343,11 @@ const extractHtmlSegments = (html, { acquisitionProfile, recordSourceCapture = f
 
   const segments = [
     ...contexts,
-    title ? { kind: 'title', text: title } : null,
-    description ? { kind: 'description', text: description } : null,
-    ...headingMatches.map((text) => ({ kind: 'heading', text })),
+    title ? { kind: 'title', text: title, ...(recordedCaptureText !== undefined
+      ? { supportText: textOf(sourceHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim() } : {}) } : null,
+    description ? { kind: 'description', text: description,
+      ...(recordedCaptureText !== undefined ? { supportText: descriptionText } : {}) } : null,
+    ...headingMatches,
     ...bodySegments.slice(0, profileLimits.maxCandidateSegments).map((text) => ({ kind: 'body', text })),
   ].filter(Boolean)
     .filter((segment) => isGovernedDiscoveryEvidenceFact(segment.text))
@@ -2123,7 +2227,7 @@ const buildWebsiteEvidenceObjects = ({
         acquisitionProfile,
       })
       const evidenceSupport = sourceCapture ? buildEvidenceSupport({ sourceCapture, captureText,
-        exactSegment: segment.exactSegment ?? segment.text }) : undefined
+        exactSegment: segment.exactSegment ?? segment.supportText ?? segment.text }) : undefined
       if (segment.exactSegment !== undefined && !evidenceSupport) {
         throw new Error('Website contextual extraction requires a unique exact capture paragraph.')
       }
@@ -2202,7 +2306,8 @@ export const buildWebsiteDiscoveryEvidenceFromDecodedHtml = ({
 } = {}) => {
   if (typeof recordSourceCapture !== 'boolean') throw new Error('Website source capture mode must be a boolean.')
   if (typeof html !== 'string') throw new Error('Website decoded HTML must be a string.')
-  const segments = extractHtmlSegments(html, { acquisitionProfile, recordSourceCapture })
+  const captureText = recordSourceCapture ? ordinaryWebsiteCaptureText(html) : undefined
+  const segments = extractHtmlSegments(html, { acquisitionProfile, recordSourceCapture, captureText })
   if (segments.length === 0) {
     throw new Error('Website acquisition did not find extractable customer website text.')
   }
@@ -2211,7 +2316,6 @@ export const buildWebsiteDiscoveryEvidenceFromDecodedHtml = ({
   if (recordSourceCapture && (contentTruncated || !html.isWellFormed())) {
     throw new Error('Website source capture requires complete valid decoded response text.')
   }
-  const captureText = recordSourceCapture ? stripHtmlToText(html) : undefined
   const sourceCapture = recordSourceCapture ? buildSourceCapture({ sourceId,
     originalContentHash: sourceEvidenceHash(html), captureText, adapter: 'website-html-fetch-v1',
     extractionMethod: 'DECODED_HTML_STRIPPED_TEXT', operation: 'WEBSITE_DECODED_TEXT_CAPTURE',
@@ -2282,6 +2386,8 @@ const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
   acquiredAt,
   websiteUrl,
   recordSourceCapture = false,
+  researchTransport,
+  observeResearchTransport,
   signal,
 } = {}) => {
   if (typeof recordSourceCapture !== 'boolean') throw new Error('Website source capture mode must be a boolean.')
@@ -2296,6 +2402,7 @@ const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
     response = await fetchWebsiteWithGovernedRedirects({
       normalizedUrl,
       signal,
+      ...(researchTransport ? { maxRedirects: 0 } : {}),
     })
   } catch (err) {
     throw new Error(err?.message || 'Website acquisition could not fetch the requested website.')
@@ -2303,42 +2410,84 @@ const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
 
   const finalUrl = response?.url || normalizedUrl
   assertWebsiteDomainBoundary({ requestedUrl: normalizedUrl, finalUrl })
+  observeResearchTransport?.({ httpStatus: response.status, requestedUrl: normalizedUrl, finalUrl, responseText: '', bytesRead: 0 })
 
-  if (!response?.ok) {
+  if (!response?.ok && !researchTransport) {
     throw new Error(`Website acquisition failed with HTTP ${response?.status || 'error'}.`)
   }
 
-  if (recordSourceCapture && (Number(response.status) === 206
+  if (!researchTransport && recordSourceCapture && (Number(response.status) === 206
     || String(response.headers?.get?.('content-range') || '').trim())) {
     throw new Error('Website source capture requires a complete response; partial responses are not supported.')
   }
 
   const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
-  if (contentType && !/(text\/html|application\/xhtml\+xml|text\/plain)/i.test(contentType)) {
+  const unsupportedContentType = contentType && !/(text\/html|application\/xhtml\+xml|text\/plain)/i.test(contentType)
+  if (unsupportedContentType && !researchTransport) {
     throw new Error('Website acquisition only supports HTML or plain text pages in this sprint.')
   }
 
+  let read
+  try { read = await readWebsiteResponseText(response, { signal, ...(researchTransport
+    ? { maxResponseBytes: researchTransport.maxResponseBytes, onProgress: observeResearchTransport } : {}) }) }
+  catch (error) {
+    if (!researchTransport) throw error
+    const observation = researchWebsiteObservations.get(error)
+    const text = observation?.responseText ?? null
+    throw Object.assign(new Error(observation?.limitExceeded ? 'Website response exceeded its research byte limit.'
+      : 'Website research response could not be completely captured.'), { transportReceipt: {
+      httpStatus: response.status, responseText: text, responseTextHash: text === null ? null : sourceEvidenceHash(text),
+      bytesRead: observation?.bytesRead || 0, requestedUrl: normalizedUrl, finalUrl,
+      transportOutcome: observation?.limitExceeded ? 'LIMIT_EXCEEDED' : 'FAILED', bodyComplete: false,
+    } })
+  }
   const {
     characterLimit,
     charactersRead,
     text: html,
     truncated: contentTruncated,
-  } = await readWebsiteResponseText(response, { signal })
+    bytesRead,
+  } = read
   assertWebsiteAcquisitionActive(signal)
-  return buildWebsiteDiscoveryEvidenceFromDecodedHtml({
-    html, normalizedUrl, finalUrl, acquisitionProfile, acquiredAt, recordSourceCapture,
-    contentTruncated, charactersRead, characterLimit,
-  })
+  const transportReceipt = researchTransport ? { httpStatus: response.status, transportOutcome: 'COMPLETE',
+    responseText: html, responseTextHash: sourceEvidenceHash(html), bytesRead, requestedUrl: normalizedUrl, finalUrl, bodyComplete: true } : undefined
+  try {
+    if (researchTransport && (!response.ok || unsupportedContentType || Number(response.status) === 206 || response.headers?.get?.('content-range')))
+      throw new Error('Website research response was unsuccessful or partial.')
+    const material = buildWebsiteDiscoveryEvidenceFromDecodedHtml({
+      html, normalizedUrl, finalUrl, acquisitionProfile, acquiredAt, recordSourceCapture,
+      contentTruncated, charactersRead, characterLimit,
+    })
+    return { ...material, ...(transportReceipt ? { transportReceipt } : {}) }
+  } catch (error) {
+    if (!researchTransport) throw error
+    throw Object.assign(new Error('Website research extraction could not produce complete evidence.'), { transportReceipt })
+  }
 }
 
 export const acquireWebsiteDiscoveryEvidence = async (options = {}) => {
+  const research = options.researchTransport
+  if (research !== undefined && (!research || typeof research !== 'object'
+    || Object.keys(research).some(key => !['maxResponseBytes', 'timeoutMs'].includes(key))
+    || !Number.isSafeInteger(research.maxResponseBytes) || research.maxResponseBytes < 1 || research.maxResponseBytes > 320000
+    || !Number.isSafeInteger(research.timeoutMs) || research.timeoutMs < 1 || research.timeoutMs > WEBSITE_ACQUISITION_LIMITS.timeoutMs
+    || options.recordSourceCapture !== true)) throw new Error('Website research limits are invalid.')
   const controller = new AbortController()
-  return withTimeout({
-    promise: acquireWebsiteDiscoveryEvidenceWithinDeadline({ ...options, signal: controller.signal }),
-    timeoutMs: WEBSITE_ACQUISITION_LIMITS.timeoutMs,
-    timeoutMessage: 'Website acquisition timed out.',
-    onTimeout: () => controller.abort(),
-  })
+  let observation = null, expired = false
+  try {
+    return await withTimeout({
+      promise: acquireWebsiteDiscoveryEvidenceWithinDeadline({ ...options, signal: controller.signal,
+        observeResearchTransport: research ? patch => { if (!expired) observation = { ...observation, ...patch } } : undefined }),
+      timeoutMs: research?.timeoutMs || WEBSITE_ACQUISITION_LIMITS.timeoutMs,
+      timeoutMessage: 'Website acquisition timed out.',
+      onTimeout: () => { expired = true; controller.abort() },
+    })
+  } catch (error) {
+    if (research && expired && observation) Object.assign(error, { transportReceipt: {
+      ...observation, responseTextHash: sourceEvidenceHash(observation.responseText), transportOutcome: 'TIMEOUT', bodyComplete: false,
+    } })
+    throw error
+  }
 }
 
 export const ingestUploadedDocumentDiscoveryEvidence = async ({
@@ -2666,6 +2815,11 @@ export const normalizeDiscoveryEvidenceObjects = ({
       const reviewStatus = normalizeReviewStatus(postLock.postLockOrigin && evidenceObject.reviewStatus === 'PENDING_REVIEW'
         ? 'PENDING' : evidenceObject.reviewStatus)
       const acquisitionMethod = evidenceObject.acquisitionMethod || 'CUSTOMER_PROVIDED_INPUT'
+      const reviewRationale = evidenceObject.reviewRationale
+      if (reviewRationale !== undefined && (typeof reviewRationale !== 'string'
+        || reviewRationale.trim().length < 10 || reviewRationale.trim().length > 2000)) {
+        throw new Error('Recorded evidence review rationale is invalid.')
+      }
       if (
         acquisitionMethod === 'WEBSITE_ACQUISITION'
         && !isGovernedDiscoveryEvidenceFact(extractedFact)
@@ -2693,6 +2847,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
         createdAt: evidenceObject.createdAt || createdAt || '',
         reviewStatus,
         acquisitionMethod,
+        ...(reviewRationale !== undefined ? { reviewRationale: reviewRationale.trim() } : {}),
         extractionTimestamp: evidenceObject.extractionTimestamp || evidenceObject.createdAt || createdAt || '',
         acceptedBy: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
           ? toIdString(evidenceObject.acceptedBy)
@@ -2856,18 +3011,24 @@ export const applyDiscoveryEvidenceReview = ({
   evidenceObjects = [],
   reviewStatus,
   reviewedAt,
+  rationale,
 } = {}) => {
   const normalizedEvidenceObjectId = String(evidenceObjectId || '').trim()
   const normalizedReviewStatus = normalizeReviewStatus(reviewStatus)
+  const reason = typeof rationale === 'string' ? rationale.trim() : undefined
+  if (rationale !== undefined && (!reason || reason.length < 10 || reason.length > 2000)) {
+    throw new Error('Evidence review rationale must contain 10 to 2000 characters.')
+  }
   let found = false
 
   const nextEvidenceObjects = evidenceObjects.map((evidenceObject) => {
     if (evidenceObject.evidenceObjectId !== normalizedEvidenceObjectId) return evidenceObject
     found = true
-
+    const { reviewRationale: _previousRationale, ...recordedEvidence } = evidenceObject
     return withGraphReadyEvidenceMetadata({
-      ...evidenceObject,
+      ...recordedEvidence,
       reviewStatus: normalizedReviewStatus,
+      ...(normalizedReviewStatus !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING && reason ? { reviewRationale: reason } : {}),
       acceptedBy: normalizedReviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
         ? toIdString(actorUserId)
         : '',

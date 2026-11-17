@@ -1,6 +1,9 @@
 import { jest, beforeAll, afterAll, test, expect } from '@jest/globals'
 import mongoose from 'mongoose'
-import { MongoMemoryServer } from 'mongodb-memory-server'
+import { MongoMemoryReplSet } from 'mongodb-memory-server'
+import { randomUUID } from 'node:crypto'
+import RuntimeStateMigrationReceipt from '../models/RuntimeStateMigrationReceipt.js'
+import { stageRuntimeStateNativeInitialization } from '../services/runtimeStateNativeInitializationService.js'
 import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
 import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
 
@@ -17,12 +20,14 @@ const { listRuntimeStateSources, listRuntimeStateEvidenceObjects } = await impor
 const input = { scopes: scope, runtimeInstanceId: String(ids.runtimeInstanceId) }
 let mongo
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create()
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } })
   const uri = mongo.getUri('ss042_source_reads')
   if (!uri.startsWith('mongodb://127.0.0.1:')) throw new Error('Isolated loopback Mongo required')
   await mongoose.connect(uri, { autoIndex: false, autoCreate: false })
   await RuntimeEvidenceSource.createCollection()
   await RuntimeEvidenceObject.createCollection()
+  await RuntimeStateMigrationReceipt.createCollection()
+  await RuntimeStateMigrationReceipt.createIndexes()
   await RuntimeEvidenceSource.createIndexes()
   await RuntimeEvidenceObject.createIndexes()
   await RuntimeEvidenceSource.collection.insertMany(Array.from({ length: 61 }, (_, i) => ({
@@ -142,4 +147,67 @@ test('complete empty review/acceptance filters return scoped zero; missing unfil
   count.mockRestore()
   await RuntimeEvidenceObject.collection.deleteMany({ ...ids, current: true })
   await expect(listRuntimeStateEvidenceObjects(input)).rejects.toMatchObject({ code: 'RUNTIME_STATE_V2_EVIDENCE_MISSING' })
+})
+
+describe('authoritative native initial empty evidence', () => {
+  const originalControl = getRuntimeInstance.getMockImplementation()
+  let runtime, args, receipt
+  beforeEach(async () => {
+    const customerId = new mongoose.Types.ObjectId(), tenantId = new mongoose.Types.ObjectId(), _id = new mongoose.Types.ObjectId()
+    runtime = { _id, id: String(_id), customerId, tenantId, runtimeInstanceKey: 'empty-' + randomUUID(),
+      stateVersion: 'rsv2:' + randomUUID(), updatedAt: new Date(), status: 'ACTIVE', framework_state: {} }
+    args = { runtimeInstanceId: String(_id), scopes: { customer: { _id: String(customerId) },
+      tenant: { _id: String(tenantId), customerId: String(customerId) } } }
+    const session = await mongoose.startSession()
+    try { await session.withTransaction(async () => {
+      receipt = await stageRuntimeStateNativeInitialization({ runtimeInstance: runtime, session })
+    }) } finally { await session.endSession() }
+    getRuntimeInstance.mockResolvedValue(runtime)
+  })
+  afterEach(() => { jest.restoreAllMocks(); getRuntimeInstance.mockImplementation(originalControl) })
+
+  test('real native receipt permits a scoped current empty page without writing or inventing evidence', async () => {
+    const before = await RuntimeStateMigrationReceipt.findById(receipt._id).lean()
+    const page = await listRuntimeStateEvidenceObjects(args)
+    expect(page).toMatchObject({ total: 0, totalCapped: false, evidenceObjects: [], sourceRegistry: [],
+      stateVersion: runtime.stateVersion, pageReceipt: { result: 'EMPTY_PAGE', total: 0, stateVersion: runtime.stateVersion } })
+    expect(await RuntimeStateMigrationReceipt.findById(receipt._id).lean()).toEqual(before)
+    expect(await RuntimeEvidenceObject.countDocuments({ runtimeInstanceId: runtime._id })).toBe(0)
+  })
+
+  test.each(['missing', 'stale', 'scope', 'status', 'operation', 'hash', 'count', 'digest', 'binding', 'targets', 'duplicate domain'])('keeps %s initialization proof blocked', async mode => {
+    const collection = RuntimeStateMigrationReceipt.collection, where = { _id: receipt._id }
+    if (mode === 'missing') await collection.deleteOne(where)
+    else {
+      const changes = {
+        stale: { assignedStateVersion: 'rsv2:' + randomUUID() }, scope: { tenantId: new mongoose.Types.ObjectId() },
+        status: { status: 'FAILED' }, operation: { operationType: 'LEGACY_BASELINE' },
+        hash: { 'logicalSources.1.sourceHash': 'sha256:' + 'a'.repeat(64) }, count: { 'logicalSources.1.recordCount': 1 },
+        digest: { scopeDigest: 'sha256:' + 'b'.repeat(64) }, binding: { 'targetSelectionRef.bindingRef': 'foreign' },
+        targets: { 'logicalSources.1.targetCollections': ['runtime_evidence_objects'] },
+        'duplicate domain': { logicalSources: [receipt.logicalSources[1].toObject(), receipt.logicalSources[1].toObject()] },
+      }
+      await collection.updateOne(where, { $set: changes[mode] })
+    }
+    await expect(listRuntimeStateEvidenceObjects(args)).rejects.toMatchObject({ code: 'RUNTIME_STATE_V2_EVIDENCE_MISSING' })
+  })
+
+  test.each(['source', 'historical source', 'historical evidence'])('does not treat %s storage as pristine empty', async mode => {
+    const row = { customerId: runtime.customerId, tenantId: runtime.tenantId, runtimeInstanceId: runtime._id,
+      runtimeInstanceKey: runtime.runtimeInstanceKey, stateVersion: runtime.stateVersion,
+      current: mode === 'source', ...(mode !== 'source' ? { stateStatus: 'HISTORICAL' } : {}) }
+    if (mode.includes('source')) await RuntimeEvidenceSource.collection.insertOne({ ...row, sourceId: 'previous', sourceType: 'WEBSITE' })
+    else await RuntimeEvidenceObject.collection.insertOne({ ...row, evidenceObjectId: 'previous', sourceId: 'previous' })
+    await expect(listRuntimeStateEvidenceObjects(args)).rejects.toMatchObject({ code: 'RUNTIME_STATE_V2_EVIDENCE_MISSING' })
+  })
+
+  test('a rejected receipt read stays unavailable', async () => {
+    jest.spyOn(mongoose.connection.collection('runtime_state_migration_receipts'), 'find').mockImplementationOnce(() => { throw Error('Synthetic read rejection') })
+    await expect(listRuntimeStateEvidenceObjects(args)).rejects.toMatchObject({ status: 503 })
+  })
+
+  test('a basis change during empty-proof reads stays blocked', async () => {
+    getRuntimeInstance.mockResolvedValueOnce(runtime).mockResolvedValueOnce({ ...runtime, stateVersion: 'rsv2:' + randomUUID() })
+    await expect(listRuntimeStateEvidenceObjects(args)).rejects.toMatchObject({ code: 'RUNTIME_STATE_V2_EVIDENCE_MISSING' })
+  })
 })

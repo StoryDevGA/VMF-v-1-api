@@ -2,18 +2,100 @@ import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import env from '../config/env.js'
 import { CONTROLLED_REPLAY_BINDINGS, verifyControlledReplayAuthority,
-  verifyControlledReplayExclusions } from '../constants/controlledReplayBindings.js'
+  verifyControlledReplayExclusions, verifyProviderFreeSearchReceiptScope } from '../constants/controlledReplayBindings.js'
 import { controlledReplaySelectorSchema, assertStoredControlledReplayBinding, storedControlledReplayBindingDigest,
   validateStoredControlledReplayProvenance, assertControlledReplayBinding } from './controlledReplayContract.js'
 import { isControlledSyntheticOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
 import { isRuntimeLocked, isRuntimeLifecycleTruthImmutable } from './runtimeActionPolicyService.js'
 import { validateControlledReplayIsolation, assertNoControlledReplayIsolation } from './controlledReplayIsolationService.js'
 import { buildControlledReplayEvidenceFromDecodedHtml } from './discoveryIntelligenceService.js'
+import { executeTavilySearchTransport } from './publicResearchTransportService.js'
 
 const resolved = new WeakSet()
 const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) }
   return value
+}
+// Separate receipt fixture identity. This is not a WEBSITE replay binding or a
+// provider grant. The maintained bytes have a production fixture-mode caller.
+export const PROVIDER_FREE_SEARCH_FIXTURE = freeze({ fixtureId: 'trilogy-clients-search.v1', fixtureVersion: 1,
+  fixtureFileSha256: '52f6c26a69f42f876a7d2f60880f80065e33d21df2bfc40aa1a061ec9c6fff77',
+  targetUrl: 'https://www.trilogywebsolutions.co.uk/clients/', provider: 'TAVILY_SEARCH' })
+export const PUBLIC_RESEARCH_FIXTURE = freeze({ fixtureId: 'controlled-public-research.v1', fixtureVersion: 1,
+  fixtureFileSha256: 'ee89208adc61a1a03c5ca5bed10c93b0e703799991ac5dfd6c6c5700058d6c87',
+  controlledBindingId: 'local-public-research.1' })
+export const loadPublicResearchFixture = async () => {
+  try {
+    const bytes = await readFile(new URL('../runtime-contracts/controlled-replay/public-research-response.v1.json', import.meta.url))
+    if (createHash('sha256').update(bytes).digest('hex') !== PUBLIC_RESEARCH_FIXTURE.fixtureFileSha256) throw new Error()
+    return freeze(JSON.parse(bytes.toString('utf8')))
+  } catch { fail('PUBLIC_RESEARCH_FIXTURE_UNVERIFIED') }
+}
+export const verifyPublicResearchFixtureReadScope = async args => {
+  // Reuse exact native identity/topology facts. This grants no execution or live
+  // provider access; new capture still requires its separate controlled grant.
+  await verifyProviderFreeSearchReceiptScope({ ...args, allowRecordedControlledCapture: true })
+}
+export const assertPublicResearchFixtureExecution = async ({ configuration, runtimeInstance, actorUserId, controlledContext, payload, session }) => {
+  const asset = await loadPublicResearchFixture(), context = assertResolvedControlledReplay(controlledContext)
+  await verifyPublicResearchFixtureReadScope({ runtimeInstance, actorUserId, session })
+  assertControlledReplayCurrent(context, runtimeInstance, payload)
+  await verifyControlledReplayCurrentAuthority(context, runtimeInstance, session)
+  const settings = configuration.settings, previous = runtimeInstance.framework_state?.evidence_pack
+  if (context.descriptor.binding.bindingId !== asset.controlledBindingId
+    || settings.startingUrls.length !== 1 || settings.startingUrls[0] !== asset.targetUrl
+    || settings.sources.length !== 2 || !['SEARCH', 'WEBSITE'].every(key => settings.sources.includes(key))
+    || !Array.isArray(previous?.sourceRegistry) || previous.sourceRegistry.length || !Array.isArray(previous?.evidenceObjects) || previous.evidenceObjects.length)
+    fail('PUBLIC_RESEARCH_FIXTURE_SETTINGS_UNSUPPORTED')
+  return asset
+}
+export const buildPublicResearchFixturePolicy = ({ asset, configuration, runtimeInstance, actorUserId, requestKey }) => ({
+  contractVersion: 'public-research-operating-policy.v1', environment: 'DEVELOPMENT_TEST', releaseId: requestKey,
+  expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), binding: { customerId: String(runtimeInstance.customerId),
+    tenantId: String(runtimeInstance.tenantId), runtimeInstanceId: String(runtimeInstance._id || runtimeInstance.id),
+    runtimeInstanceKey: runtimeInstance.runtimeInstanceKey, actorUserId: String(actorUserId),
+    configurationVersion: configuration.configurationVersion, configurationHash: configuration.configurationHash,
+    basisStateVersion: configuration.basisStateVersion, basisUpdatedAt: configuration.basisUpdatedAt },
+  approvalRef: 'SYNTHETIC_FIXTURE_ONLY_NOT_PRODUCT_APPROVAL', licensingRef: 'SYNTHETIC_LOCAL_MATERIAL_ONLY',
+  retentionRef: 'RETAIN_ISOLATED_FIXTURE_EVIDENCE', disclosureRef: 'NO_EXTERNAL_DISCLOSURE', processingRegion: 'LOCAL_ONLY',
+  credentialOwner: 'NONE_OFFLINE', spendOwner: 'NONE_OFFLINE', references: [{
+    url: 'https://docs.tavily.com/documentation/api-reference/endpoint/search', version: 'documentation-snapshot-2026-11-13',
+    sha256: 'sha256:f21c26009cd512a70e18ee6d4bedd9e7699e429fe850fc957a93705ccd24c888' }, {
+    url: 'https://developer-specs.company-information.service.gov.uk/companies-house-public-data-api/reference/company-profile/company-profile',
+    version: 'documentation-snapshot-2026-11-13', sha256: 'sha256:43648e1d61c6cec372d07a69979f1660f6778ec787636155a2cdf4526d64e745' }],
+  approvedStartingUrls: [asset.targetUrl], approvedDiscoveryUrls: [], approvedTerms: asset.approvedTerms,
+  partialSave: 'PRESERVE_PENDING', limits: { maxSearchRequests: 1, maxRegistryRequests: 0, maxPages: 1,
+    maxPageBytes: 320000, maxJsonBytes: 16384, maxTotalBytes: 1048576, maxElapsedMs: 120000, maxRequestMs: 6000,
+    maxCostMicros: 0, searchRequestCostMicros: 0, registryRequestCostMicros: 0,
+    concurrency: 1, retries: 0, redirects: 0, modelTokens: 0 },
+})
+export const loadProviderFreeSearchFixture = async () => {
+  try {
+    const bytes = await readFile(new URL('../runtime-contracts/controlled-replay/search-response.v1.json', import.meta.url))
+    if (createHash('sha256').update(bytes).digest('hex') !== PROVIDER_FREE_SEARCH_FIXTURE.fixtureFileSha256) throw new Error()
+    return freeze(JSON.parse(bytes.toString('utf8')))
+  } catch { fail('PROVIDER_FREE_SEARCH_ASSET_UNVERIFIED') }
+}
+export const buildProviderFreeSearchFixtureInput = async ({ selector, settings }) => {
+  const asset = await loadProviderFreeSearchFixture()
+  return { selector, settings, provider: asset.provider, approvedHostname: new URL(asset.targetUrl).hostname,
+    approvedTerms: asset.approvedTerms, responseId: asset.responseId, capturedAt: asset.capturedAt,
+    transportOutcome: asset.transportOutcome, httpStatus: asset.httpStatus, simulatedElapsedMs: asset.simulatedElapsedMs,
+    responseText: JSON.stringify(asset.response) }
+}
+// Internal fixture transport only. Start supplies no transport dependency; its
+// responder consumes the verified local asset, never fetch or credentials.
+export const dispatchProviderFreeSearchFixture = async (args, { send } = {}) => {
+  const fixture = await buildProviderFreeSearchFixtureInput(args)
+  try {
+    const response = await executeTavilySearchTransport(fixture, { mode: 'OFFLINE',
+      send: send || (async () => new Response(fixture.responseText, { status: fixture.httpStatus })) })
+    return { ...fixture, transportOutcome: response.transportOutcome, httpStatus: response.httpStatus, responseText: response.responseText }
+  } catch (error) {
+    if (error?.code === 'PUBLIC_RESEARCH_RESPONSE_INVALID') throw error
+    fail(error?.details?.reason === 'PUBLIC_RESEARCH_RESPONSE_TOO_LARGE'
+      ? 'PROVIDER_FREE_SEARCH_RESPONSE_TOO_LARGE' : 'PROVIDER_FREE_SEARCH_TRANSPORT_INVALID')
+  }
 }
 const fail = reason => { throw Object.assign(new Error('Controlled replay is unavailable for this scope.'), {
   status: 409, code: 'CONFLICT', details: { reason },

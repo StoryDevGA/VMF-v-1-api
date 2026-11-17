@@ -84,7 +84,13 @@ test('native multi-page review read budgets actual metadata, population and rece
   }
   for (const name of [RuntimeInstance, Role, Customer, Tenant, LicenseLevel, RuntimeReviewCompletion].map(model => model.collection.name))
     expect(reads.some(command => command.find === name)).toBe(true)
-  const pages = reads.filter(command => command.find === collections[0])
+  const evidenceReads = reads.filter(command => command.find === collections[0])
+  const provenanceProbes = evidenceReads.filter(command => command.filter.controlledReplayProvenance?.$exists === true)
+  expect(provenanceProbes).toHaveLength(1)
+  expect(provenanceProbes[0]).toMatchObject({ limit: 1, batchSize: 1, singleBatch: true,
+    projection: { _id: 1 }, filter: { customerId: ids.customerId, tenantId: ids.tenantId,
+      runtimeInstanceId: ids.runtimeInstanceId, runtimeInstanceKey: key, stateVersion: version, current: true } })
+  const pages = evidenceReads.filter(command => !provenanceProbes.includes(command))
   expect(pages).toHaveLength(4)
   for (const command of pages) { expect(command.limit).toBe(150); expect(command.batchSize).toBe(150) }
   const history = reads.find(command => command.find === RuntimeReviewCompletion.collection.name)

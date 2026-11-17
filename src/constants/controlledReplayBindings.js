@@ -7,6 +7,7 @@ import Tenant from '../models/Tenant.js'
 import RuntimeInstance from '../models/RuntimeInstance.js'
 import { assertStoredControlledReplayBinding, storedControlledReplayBindingDigest } from '../services/controlledReplayContract.js'
 import { isControlledSyntheticOutcomeRuntime } from '../services/syntheticOutcomeIsolationService.js'
+import { validateControlledReplayIsolation } from '../services/controlledReplayIsolationService.js'
 
 const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) }
@@ -92,4 +93,55 @@ export const verifyControlledReplayExclusions = async args => {
     || runtime.revision.rootRuntimeInstanceKey && runtime.revision.rootRuntimeInstanceKey !== binding.revisionId
     || isControlledSyntheticOutcomeRuntime(runtime)) unavailable(reason)
   return { classification: 'LOCAL_ENGINEERING_FIXTURE', isolationRef: binding.isolationRef, parlon: false, heldSs044Family: false }
+}
+
+// Independent receipt-only capability. This neither consumes nor expands the
+// WEBSITE replay grant, and no HTTP dispatcher exposes this operation.
+export const verifyProviderFreeSearchReceiptScope = async ({ runtimeInstance, actorUserId, session, writeFence = false,
+  allowRecordedControlledCapture = false }) => {
+  const reason = 'PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED', binding = registration.binding, local = registration.local
+  requireLocal({ registration, binding, runtimeInstance, actorUserId }, reason)
+  const user = await read(User.findById(binding.actorUserId).select('name isActive memberships tenantMemberships vmfGrants __v'), session, reason)
+  const roles = await read(Role.find({ key: local.roleKey }).select('key scope isActive permissions __v').limit(2), session, reason)
+  const role = roles.length === 1 ? roles[0] : null, membership = user?.tenantMemberships?.[0]
+  const customer = await read(Customer.findById(binding.scope.customerId).select('name status topology defaultTenantId __v'), session, reason)
+  const tenant = await read(Tenant.findById(binding.scope.tenantId).select('name customerId status isDefault tenantAdminUserIds __v'), session, reason)
+  const runtime = await read(RuntimeInstance.findOne({ _id: binding.scope.runtimeInstanceId,
+    customerId: binding.scope.customerId, tenantId: binding.scope.tenantId })
+    .select('customerId tenantId runtimeInstanceKey runtimeType frameworkKey status revision controlledReplayIsolation'), session, reason)
+  if (!user || user.name !== local.actorName || user.isActive !== true || !Array.isArray(user.memberships) || user.memberships.length
+    || !Array.isArray(user.vmfGrants) || user.vmfGrants.length || !Array.isArray(user.tenantMemberships) || user.tenantMemberships.length !== 1
+    || String(membership?.customerId) !== binding.scope.customerId || String(membership?.tenantId) !== binding.scope.tenantId
+    || !Array.isArray(membership?.roles) || membership.roles.length !== 1 || membership.roles[0] !== local.roleKey
+    || !role || !role.isActive || role.scope !== 'TENANT' || !Array.isArray(role.permissions)
+    || !['VMF_VIEW', 'VMF_UPDATE'].every(permission => role.permissions.includes(permission))
+    || !customer || customer.name !== local.customerName || customer.status !== 'ACTIVE' || customer.topology !== 'SINGLE_TENANT'
+    || String(customer.defaultTenantId) !== binding.scope.tenantId || !tenant || tenant.name !== local.tenantName
+    || String(tenant.customerId) !== binding.scope.customerId || tenant.status !== 'ENABLED' || tenant.isDefault !== true
+    || !Array.isArray(tenant.tenantAdminUserIds) || tenant.tenantAdminUserIds.length !== 1 || String(tenant.tenantAdminUserIds[0]) !== binding.actorUserId
+    || !runtime || runtime.runtimeInstanceKey !== binding.revisionId || !['ACTIVE', 'LOCKED'].includes(runtime.status)
+    || runtime.runtimeType !== 'VALUE_NARRATIVE' || runtime.frameworkKey !== 'VMF' || runtime.revision?.revisionNumber !== 1
+    || runtime.revision.parentRuntimeId || runtime.revision.parentRuntimeInstanceKey
+    || runtime.revision.rootRuntimeId && String(runtime.revision.rootRuntimeId) !== binding.scope.runtimeInstanceId
+    || runtime.revision.rootRuntimeInstanceKey && runtime.revision.rootRuntimeInstanceKey !== binding.revisionId
+    || isControlledSyntheticOutcomeRuntime(runtime)) unavailable(reason)
+  if (Object.hasOwn(runtime, 'controlledReplayIsolation')) {
+    if (allowRecordedControlledCapture !== true) unavailable(reason)
+    try {
+      const marker = validateControlledReplayIsolation(runtime.controlledReplayIsolation, runtime)
+      if (marker.bindingDigest !== storedControlledReplayBindingDigest(binding)) unavailable(reason)
+    } catch { unavailable(reason) }
+  }
+  if (writeFence) {
+    if (!session?.inTransaction()) unavailable(reason)
+    for (const [model, row] of [[User, user], [Role, role], [Customer, customer], [Tenant, tenant]]) {
+      if (row.__v !== undefined && (!Number.isSafeInteger(row.__v) || row.__v < 0)) unavailable(reason)
+      const changed = await model.collection.updateOne({ _id: row._id,
+        __v: row.__v === undefined ? { $exists: false } : row.__v }, { $inc: { __v: 1 } }, { session, maxTimeMS: 2000 })
+      if (changed.modifiedCount !== 1) unavailable(reason)
+    }
+  }
+  return freeze({ classification: 'LOCAL_SYNTHETIC_RECEIPT_ONLY', purpose: 'TAVILY_DISCOVERY_RECEIPT',
+    authorityRef: 'ss049-provider-free-search-receipt.2026-11-13.v1',
+    scope: { ...binding.scope, runtimeInstanceKey: binding.revisionId }, actorUserId: binding.actorUserId })
 }

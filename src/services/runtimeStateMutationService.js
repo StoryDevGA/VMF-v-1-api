@@ -1174,7 +1174,9 @@ const acquireSubmittedWebsiteSources = async ({
   acquisitionProfile,
   capturedAt,
   websiteSources = [],
+  preAcquired,
 } = {}) => {
+  if (preAcquired !== undefined && !(preAcquired instanceof Map)) throw new Error('Recorded website material is invalid.')
   const acquisitionResults = {
     sources: [],
     sourceRegistry: [],
@@ -1187,10 +1189,11 @@ const acquireSubmittedWebsiteSources = async ({
   for (const websiteUrl of websiteSources) {
     let result
     try {
-      const acquiredWebsite = await acquireWebsiteDiscoveryEvidence({
+      const acquiredWebsite = preAcquired ? preAcquired.get(websiteUrl) : await acquireWebsiteDiscoveryEvidence({
         acquisitionProfile,
         acquiredAt: capturedAt,
         websiteUrl,
+        recordSourceCapture: true,
       })
       result = {
         source: acquiredWebsite.source,
@@ -1280,7 +1283,10 @@ export const buildDiscoveryEvidencePack = async ({
     const profile = acquisitionProfile || 'STANDARD'
     if (!['STANDARD', 'ENHANCED'].includes(profile)) throw new Error('Controlled acquisition profile is invalid.')
     const refreshedAt = new Date().toISOString()
-    const produced = buildResolvedControlledReplay({ context: controlled, acquisitionProfile: profile,
+    const cached = acquisitionExecution.publicResearchCaptures?.get(controlled.descriptor.binding.fixture.sourceUrl)
+    if (acquisitionExecution.publicResearchExecution && !cached)
+      throw new Error('Public Research has no recorded original capture to save.')
+    const produced = cached || buildResolvedControlledReplay({ context: controlled, acquisitionProfile: profile,
       runId: acquisitionExecution.runId, attemptId: acquisitionExecution.executionAttemptId, capturedAt: refreshedAt })
     const sources = [produced.source]
     const evidenceObjects = normalizeDiscoveryEvidenceObjects({ acquisitionProfile: profile, createdAt: refreshedAt,
@@ -1351,7 +1357,8 @@ export const buildDiscoveryEvidencePack = async ({
   const projectableSections = frameworkPackage
     ? buildProjectableSectionsForAdvance({ frameworkPackage, runtimePathRecords, uiContract })
     : []
-  const inputSources = inputEvidenceKeys.map((key) => ({
+  // Research Context guides acquisition; it is not original public evidence.
+  const inputSources = acquisitionExecution?.publicResearchExecution ? [] : inputEvidenceKeys.map((key) => ({
     sourceId: `input_${key}`,
     type: key === 'companyWebsite' ? 'USER_PROVIDED_WEBSITE' : 'USER_PROVIDED_INPUT',
     fieldKey: key,
@@ -1383,6 +1390,7 @@ export const buildDiscoveryEvidencePack = async ({
       acquisitionProfile: profile,
       capturedAt: refreshedAt,
       websiteSources,
+      ...(acquisitionExecution?.publicResearchExecution ? { preAcquired: acquisitionExecution.publicResearchCaptures } : {}),
     })
   }
   let documentAcquisition = {
@@ -4340,6 +4348,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     evidenceObjects: previousEvidenceObjects,
     reviewStatus,
     reviewedAt,
+    rationale: payload?.rationale,
   })
 
   if (!reviewResult.found) {
@@ -4355,6 +4364,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     })
   }
 
+  const reviewedEvidence = reviewResult.evidenceObjects.find(item => item.evidenceObjectId === String(evidenceObjectId || '').trim())
   const sourceRegistry = buildDiscoverySourceRegistry({
     capturedAt: previousEvidencePack.refreshedAt || reviewedAt,
     evidenceObjects: reviewResult.evidenceObjects,
@@ -4455,7 +4465,11 @@ export const reviewRuntimeDiscoveryEvidence = async ({
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
-    additionalDiff: graphRebuild.auditDiff,
+    additionalDiff: { ...graphRebuild.auditDiff, evidenceDecision: {
+      evidenceObjectId: reviewedEvidence.evidenceObjectId, sourceId: reviewedEvidence.sourceId,
+      reviewStatus, rationale: reviewedEvidence.reviewRationale ?? null,
+      reviewedBy: toIdString(actorUserId), reviewedAt,
+    } },
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,

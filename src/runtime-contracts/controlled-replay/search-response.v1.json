@@ -1,0 +1,31 @@
+{
+  "fixtureId": "trilogy-clients-search.v1",
+  "fixtureVersion": 1,
+  "targetUrl": "https://www.trilogywebsolutions.co.uk/clients/",
+  "provider": "TAVILY_SEARCH",
+  "classification": "SYNTHETIC_NOT_RETRIEVED_WEBSITE_CONTENT",
+  "approvedTerms": [
+    "clients"
+  ],
+  "responseId": "synthetic-trilogy-clients-response-v1",
+  "capturedAt": "2026-11-13T00:00:00.000Z",
+  "transportOutcome": "COMPLETE",
+  "httpStatus": 200,
+  "simulatedElapsedMs": 1,
+  "response": {
+    "query": "site:www.trilogywebsolutions.co.uk clients",
+    "request_id": "synthetic-trilogy-clients-request-v1",
+    "results": [
+      {
+        "url": "https://www.trilogywebsolutions.co.uk/clients/",
+        "title": "Synthetic provider-free fixture",
+        "content": "Synthetic provider-free fixture; not retrieved website content or a client fact.",
+        "score": 0.5
+      }
+    ],
+    "usage": {
+      "credits": 1
+    },
+    "response_time": 0.001
+  }
+}

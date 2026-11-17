@@ -1,0 +1,26 @@
+{
+  "fixtureId": "controlled-public-research.v1",
+  "fixtureVersion": 1,
+  "classification": "CONTROLLED_PROVIDER_FREE_RESEARCH",
+  "controlledBindingId": "local-public-research.1",
+  "targetUrl": "https://controlled-context.example/case-study",
+  "approvedTerms": [
+    "case study"
+  ],
+  "search": {
+    "query": "site:controlled-context.example case study",
+    "request_id": "synthetic-combined-search-1",
+    "results": [
+      {
+        "url": "https://controlled-context.example/case-study",
+        "title": "Synthetic controlled case study",
+        "content": "Offline discovery fixture only; not native website evidence.",
+        "score": 0.5
+      }
+    ],
+    "usage": {
+      "credits": 1
+    },
+    "response_time": 0.001
+  }
+}

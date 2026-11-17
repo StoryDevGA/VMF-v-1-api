@@ -1,7 +1,9 @@
-import { validateResearchRunConfiguration, researchConfigurationReference } from './researchConfigurationContract.js'
+import { validateResearchRunConfiguration, researchConfigurationReference, PROVIDER_FREE_SEARCH_RUN_VERSION,
+  validateProviderFreeSearchRun, providerFreeSearchAuditBinding } from './researchConfigurationContract.js'
 import AuditLog from '../models/AuditLog.js'
 import { snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
-import { validateControlledReplayRunIdentity } from './controlledReplayContract.js'
+import { validateControlledReplayRunIdentity, validateStoredControlledReplayProvenance } from './controlledReplayContract.js'
+import { PUBLIC_RESEARCH_RUN_VERSION, validatePublicResearchRun } from './publicResearchContract.js'
 
 export const STOPPED_WORKER_RECOVERY_REASON = 'STOPPED_WORKER_RECOVERY'
 export const ORIGINAL_EXTRACTION_UNCONFIRMED = 'ORIGINAL_EXTRACTION_OUTCOME_UNCONFIRMED'
@@ -37,6 +39,11 @@ export const assertAcquisitionTerminalProof = (row, terminalAudit, saveAnchor) =
   }) }
   const audit = terminalAudit instanceof AuditLog ? terminalAudit : terminalAudit ? AuditLog.hydrate(terminalAudit) : null
   const retry = row.predecessorExecutionAttemptId ? { predecessorRunId: row.predecessorRunId, predecessorExecutionAttemptId: row.predecessorExecutionAttemptId } : null
+  if (row.contractVersion === PROVIDER_FREE_SEARCH_RUN_VERSION) {
+    let record
+    try { record = validateProviderFreeSearchRun(row) } catch { invalid() }
+    if (snapshotHash(audit?.diff?.providerFreeSearch) !== snapshotHash(providerFreeSearchAuditBinding(record))) invalid()
+  } else if (row.providerFreeSearch !== undefined || row.receiptRecorded !== undefined || audit?.diff?.providerFreeSearch !== undefined) invalid()
   if (snapshotHash(retry) !== snapshotHash(audit?.diff?.researchRetry || null)
     || row.researchConfiguration && Boolean(row.predecessorRunId) !== Boolean(row.predecessorExecutionAttemptId)
     || row.predecessorExecutionAttemptId && !row.researchConfiguration) invalid()
@@ -45,7 +52,19 @@ export const assertAcquisitionTerminalProof = (row, terminalAudit, saveAnchor) =
     try { record = validateResearchRunConfiguration(row) } catch { invalid() }
     if (snapshotHash(researchConfigurationReference(record) || null) !== snapshotHash(audit?.diff?.researchConfiguration || null)) invalid()
   }
-  if (row.contractVersion === 'controlled-acquisition-run.v1') {
+  if (row.contractVersion === PUBLIC_RESEARCH_RUN_VERSION) {
+    try {
+      validatePublicResearchRun(row)
+      if (row.controlledReplayProvenance) validateStoredControlledReplayProvenance(row.controlledReplayProvenance, {
+        customerId: String(row.customerId), tenantId: String(row.tenantId), runtimeInstanceId: String(row.runtimeInstanceId),
+        runtimeInstanceKey: row.runtimeInstanceKey })
+    } catch { invalid() }
+    if (audit?.diff?.publicResearchPlanHash !== row.publicResearch.plan.planHash
+      || audit?.diff?.publicResearchReceiptHash !== row.publicResearch.ledgerHash
+      || audit?.diff?.publicResearchLedgerSequence !== row.publicResearch.ledgerSequence
+      || audit?.diff?.publicResearchControlledDescriptorHash !== (row.controlledReplayProvenance ? snapshotHash(row.controlledReplayProvenance) : null)
+      || audit?.diff?.controlledRun !== undefined) invalid()
+  } else if (row.contractVersion === 'controlled-acquisition-run.v1') {
     if (audit?.diff?.controlledRun === undefined) invalid()
     let descriptor
     try { descriptor = validateControlledReplayRunIdentity(row) } catch { invalid() }
@@ -79,7 +98,7 @@ export const assertAcquisitionTerminalProof = (row, terminalAudit, saveAnchor) =
     || saveAnchor.signatureVersion !== row.saveAuditSignatureVersion
     || !['RUNTIME_STATE_MUTATED', 'RUNTIME_ACTION_EXECUTED'].includes(saveAnchor.action))) invalid()
   if (row.status === 'CANCELLED') {
-    if (row.contractVersion !== 'controlled-acquisition-run.v1' || !row.researchConfiguration || row.active !== false
+    if (!['controlled-acquisition-run.v1', PUBLIC_RESEARCH_RUN_VERSION].includes(row.contractVersion) || !row.researchConfiguration || row.active !== false
       || row.canonicalSaved !== false || row.outputStateVersion || row.saveAuditId || row.reason !== 'CANCELLED_BEFORE_SAVE'
       || Boolean(row.startedAt) !== Boolean(row.startAuditId) || Boolean(row.startedAt) !== Boolean(row.startAuditSignatureVersion)
       || audit.diff.cancellationStage !== (row.startedAt ? 'RUNNING' : 'QUEUED') || audit.diff.workerStopConfirmed !== false

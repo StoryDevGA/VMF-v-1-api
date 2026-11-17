@@ -2228,6 +2228,16 @@ beforeAll(async () => {
   // This mounted legacy suite isolates acquisition persistence explicitly.
   // Real Run/index/transaction/race proof lives in acquisitionRun.integration.test.js.
   await jest.unstable_mockModule('../services/acquisitionRunService.js', () => ({
+    ACQUISITION_TRANSACTION_OPTIONS: Object.freeze({ timeoutMS: 6000, maxCommitTimeMS: 2000,
+      readConcern: Object.freeze({ level: 'snapshot' }), writeConcern: Object.freeze({ w: 'majority' }) }),
+    cancelAcquisitionRun: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    assertAcquisitionResearchConfigurationCurrent: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    replayRegisteredProviderFreeSearchRequest: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    recordProviderFreeTavilyReceipt: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    replayPublicResearchRequest: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    reservePublicResearchOperation: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    recordPublicResearchOperation: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
+    assertPublicResearchOperationCurrent: jest.fn(() => { throw new Error('UNEXPECTED_ACQUISITION_FIXTURE_CALL') }),
     // This fixture does not prove processing receipt binding or Run persistence.
     bindAcquisitionSourceProcessing: jest.fn((_context, pack) => pack),
     lookupAcquisitionRequest: jest.fn().mockResolvedValue(null), startAcquisitionRun: jest.fn(),
@@ -8108,6 +8118,17 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test.each([{ rationale: 'short' }, { rationale: 'x'.repeat(2001) }, { rationale: null }, { rationale: 42 },
+    { rationale: 'A valid source-bound reason.', reviewedBy: CUSTOMER_ADMIN_ID },
+    { rationale: 'A valid source-bound reason.', reviewedAt: '2026-11-17T16:00:00.000Z' }])(
+    'reasoned evidence review payload rejects invalid reason or caller-owned identity %j', async fields => {
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const res = await request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-evidence/evidence_companyWebsite_fixture/review`)
+        .set('Authorization', `Bearer ${token}`).send({ reviewStatus: 'ACCEPTED', expectedUpdatedAt: '2026-05-19T08:01:00.000Z', ...fields })
+      expect(res.status).toBe(422)
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-evidence/:evidenceObjectId/review updates review state and evidence counts', async () => {
     const evidencePack = makeReviewableDiscoveryEvidencePack({
       sourceRegistry: [
@@ -8155,6 +8176,7 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         reviewStatus: 'REJECTED',
+        rationale: 'The source assertion is not sufficient for the proposed interpretation.',
         expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
       })
 
@@ -8193,6 +8215,7 @@ describe('Runtime Instance API', () => {
         evidenceObjectId: 'evidence_companyWebsite_fixture',
         reviewStatus: 'REJECTED',
         rejectedBy: CUSTOMER_ADMIN_ID,
+        reviewRationale: 'The source assertion is not sufficient for the proposed interpretation.',
         rejectionTimestamp: expect.any(String),
         acceptedBy: '',
         acceptanceTimestamp: '',
@@ -8318,6 +8341,10 @@ describe('Runtime Instance API', () => {
     expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
       {
         _id: RUNTIME_INSTANCE_ID,
+        customerId: runtimeInstanceDoc.customerId,
+        tenantId: runtimeInstanceDoc.tenantId,
+        runtimeInstanceKey: runtimeInstanceDoc.runtimeInstanceKey,
+        controlledReplayIsolation: { $exists: false },
         updatedAt: new Date('2026-05-19T08:02:00.000Z'),
         stateVersion: expect.any(String),
       },
@@ -8327,6 +8354,7 @@ describe('Runtime Instance API', () => {
           stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
+        $unset: { controlledReplayIsolation: 1 },
       },
       {
         new: true,
@@ -37383,6 +37411,45 @@ describe('inherited review mounted security without listeners', () => {
       fixture?.restore()
       listen.mockRestore()
       connect.mockRestore()
+    }
+  })
+})
+
+
+describe('provider-free search dispatch request validation', () => {
+  const selector = { configurationVersion: '11111111-1111-4111-8111-111111111111',
+    configurationHash: 'sha256:' + 'a'.repeat(64), basisStateVersion: 'rsv2:11111111-1111-4111-8111-111111111111' }
+  const payload = () => ({ researchConfiguration: selector, providerFreeSearch: { fixtureId: 'trilogy-clients-search.v1',
+    fixtureVersion: 1, fixtureFileSha256: 'a'.repeat(64) }, requestKey: '22222222-2222-4222-8222-222222222222',
+    expectedUpdatedAt: '2026-11-13T00:00:00.000Z' })
+  const validate = async (body, actionKey = 'BUILD_EVIDENCE_PACK') => {
+    const { validateExecuteRuntimeAction } = await import('../validators/runtimeInstance.validator.js')
+    const req = { body, params: { actionKey } }, next = jest.fn()
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+    validateExecuteRuntimeAction(req, res, next)
+    return { req, next, res }
+  }
+  test('accepts only the explicit saved fixture selector without accepting a response body', async () => {
+    const result = await validate(payload())
+    expect(result.next).toHaveBeenCalledTimes(1); expect(result.res.status).not.toHaveBeenCalled()
+    expect(result.req.body).toEqual(payload())
+  })
+  test.each(['controlledReplay', 'inputs', 'documentSources', 'additionalContext', 'rawResponse', 'fixture', 'approvedHostname', 'approvedTerms'])(
+    'rejects mixed or caller-supplied fixture material: %s', async key => {
+      const extras = { controlledReplay: { bindingId: 'local-public-research.1' }, inputs: {}, documentSources: [],
+        additionalContext: 'synthetic context', rawResponse: '{}', fixture: {}, approvedHostname: 'example.test', approvedTerms: [] }
+      const result = await validate({ ...payload(), [key]: extras[key] })
+      expect(result.next).not.toHaveBeenCalled(); expect(result.res.status).toHaveBeenCalledWith(422)
+    })
+  test.each(['REFRESH_EVIDENCE_PACK', 'SAVE_DISCOVERY_INPUTS'])('rejects fixture dispatch through %s', async action => {
+    const result = await validate(payload(), action)
+    expect(result.next).not.toHaveBeenCalled(); expect(result.res.status).toHaveBeenCalledWith(422)
+  })
+  test('requires saved selector and both predecessor identities', async () => {
+    const absent = payload(); delete absent.researchConfiguration
+    for (const body of [absent, { ...payload(), predecessorRunId: '33333333-3333-4333-8333-333333333333' }]) {
+      const result = await validate(body)
+      expect(result.next).not.toHaveBeenCalled(); expect(result.res.status).toHaveBeenCalledWith(422)
     }
   })
 })

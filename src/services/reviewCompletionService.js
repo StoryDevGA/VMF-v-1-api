@@ -6,12 +6,14 @@ import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
 import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
 import RuntimeStateMigrationReceipt from '../models/RuntimeStateMigrationReceipt.js'
 import RuntimeReviewCompletion, { REVIEW_COMPLETION_VERSION, REVIEW_POPULATION_POLICY } from '../models/RuntimeReviewCompletion.js'
+import AuditLog from '../models/AuditLog.js'
 import { getRuntimeInstance, assertRuntimePermission } from './runtimeInstanceService.js'
 import { isRuntimeLocked, isRuntimeLifecycleTruthImmutable } from './runtimeActionPolicyService.js'
 import { requireCanonicalRuntimeStateVersion } from './runtimeStateVersionService.js'
 import { getDiscoveryContradictionReview, isBoundedContradictionReviewHistory } from './discoveryContradictionReviewService.js'
 import auditService from './auditService.js'
 import { assembleOutcomeEvidenceInventory, snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
+import { validateEvidenceSupport, validateSourceCapture } from './sourceEvidenceContract.js'
 
 const MAX_BYTES = 512 * 1024
 const fail = (code, message, status = 409) => { throw Object.assign(new Error(message), { code, status }) }
@@ -40,9 +42,10 @@ const currentFilter = (scope) => ({ ...scope, $or: [
   { current: true }, { isCurrent: true }, { stateStatus: 'CURRENT' }, { status: 'CURRENT' },
 ] })
 const semanticEvidence = (row) => Object.fromEntries(['evidenceObjectId', 'sourceId', 'sourceType', 'lineageRef',
-  'extractedFact', 'reviewStatus', 'acceptanceState', 'validationStatus', 'contentHash', 'truthHash', 'lineageHash']
+  'extractedFact', 'reviewStatus', 'acceptanceState', 'validationStatus', 'contentHash', 'truthHash', 'lineageHash',
+  'evidenceSupport', 'reviewRationale']
   .map((field) => [field, row[field] ?? null]))
-const semanticSource = (row) => Object.fromEntries(['sourceId', 'sourceType', 'sourceRef', 'lineageRef', 'contentHash']
+const semanticSource = (row) => Object.fromEntries(['sourceId', 'sourceType', 'sourceRef', 'lineageRef', 'contentHash', 'sourceCapture']
   .map((field) => [field, row[field] ?? null]))
 
 // Server-only minimal projections reuse the complete SS-040 inventory scan. UI filters never enter this read.
@@ -70,11 +73,14 @@ const compile = async (runtime, session, deadline, readBudget) => {
       '$framework_state.evidence_pack.evidenceObjects', []] }, as: 'item', in: {
       id: '$$item.evidenceObjectId', status: '$$item.reviewStatus', acceptedBy: '$$item.acceptedBy',
       acceptanceTimestamp: '$$item.acceptanceTimestamp', rejectedBy: '$$item.rejectedBy', rejectionTimestamp: '$$item.rejectionTimestamp',
+      reviewRationale: '$$item.reviewRationale',
     } } } } },
   ]).session(session).option(readOptions(deadline, readBudget))
   bound(decisions || [])
   let expectedEvidence = evidenceCount, expectedSources = sourceCount
-  const detectorMissing = candidates === undefined || reviews === undefined
+  // A recorded empty detector has no current finding requiring review history.
+  // Missing detector data (or history needed by a real candidate) remains unknown.
+  const detectorMissing = candidates === undefined || reviews === undefined && candidates.length !== 0
   if (evidenceCount == null || sourceCount == null || detectorMissing) {
     const receipt = await RuntimeStateMigrationReceipt.findOne({ customerId: scope.customerId, tenantId: scope.tenantId,
       runtimeInstanceId: runtime.revision?.rootRuntimeId || scope.runtimeInstanceId,
@@ -107,8 +113,8 @@ const compile = async (runtime, session, deadline, readBudget) => {
     },
     readPage: async (kind, after, limit) => {
       const rows = await models[kind].find({ ...filter, ...(after ? { _id: { $gt: after } } : {}) })
-        .select(kind === 'evidence' ? 'customerId tenantId runtimeInstanceId runtimeInstanceKey stateVersion sourceStateVersion sourceHash migrationReceiptId current isCurrent status stateStatus evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus acceptanceState validationStatus contentHash truthHash lineageHash'
-          : 'customerId tenantId runtimeInstanceId runtimeInstanceKey stateVersion sourceStateVersion sourceHash migrationReceiptId current isCurrent status stateStatus sourceId sourceType sourceRef lineageRef contentHash')
+        .select(kind === 'evidence' ? 'customerId tenantId runtimeInstanceId runtimeInstanceKey stateVersion sourceStateVersion sourceHash migrationReceiptId current isCurrent status stateStatus evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus acceptanceState validationStatus contentHash truthHash lineageHash evidenceSupport reviewRationale acceptedBy acceptanceTimestamp rejectedBy rejectionTimestamp'
+          : 'customerId tenantId runtimeInstanceId runtimeInstanceKey stateVersion sourceStateVersion sourceHash migrationReceiptId current isCurrent status stateStatus sourceId sourceType sourceRef lineageRef contentHash sourceCapture')
         .sort({ _id: 1 }).limit(limit).batchSize(limit).session(session).setOptions(readOptions(deadline, readBudget)).lean()
       bound(rows)
       return rows.map((row) => {
@@ -117,6 +123,13 @@ const compile = async (runtime, session, deadline, readBudget) => {
         if (kind === 'evidence' && (!decision || decision.status !== row.reviewStatus
           || !['PENDING', 'ACCEPTED', 'REJECTED'].includes(row.reviewStatus)))
           fail('REVIEW_POPULATION_UNKNOWN', 'An evidence decision state cannot be verified.')
+        if (kind === 'evidence' && ['reviewRationale', 'acceptedBy', 'acceptanceTimestamp', 'rejectedBy', 'rejectionTimestamp']
+          .some((field) => key(decision[field]) !== key(row[field])))
+          fail('REVIEW_DECISION_PROOF_MISSING', 'Canonical and recorded evidence decision details do not reconcile.')
+        if (kind === 'evidence' && decision.reviewRationale != null
+          && (typeof decision.reviewRationale !== 'string' || decision.reviewRationale.trim().length < 10
+            || decision.reviewRationale.length > 2000))
+          fail('REVIEW_DECISION_PROOF_MISSING', 'The recorded evidence rationale is invalid.')
         if (kind === 'evidence' && row.reviewStatus !== 'PENDING') {
           const actor = row.reviewStatus === 'ACCEPTED' ? decision.acceptedBy : decision.rejectedBy
           const time = row.reviewStatus === 'ACCEPTED' ? decision.acceptanceTimestamp : decision.rejectionTimestamp
@@ -124,7 +137,20 @@ const compile = async (runtime, session, deadline, readBudget) => {
             fail('REVIEW_DECISION_PROOF_MISSING', 'An evidence disposition has no verifiable actor and time. Inspect its governed decision history.')
         }
         const semanticHash = snapshotHash(kind === 'evidence' ? { evidence: semanticEvidence(row), decision } : semanticSource(row))
-        semantic[kind].set(id, { id, basisHash: semanticHash, ...(kind === 'evidence' ? { status: row.reviewStatus } : {}) })
+        let support, capture
+        if (kind === 'evidence' && row.evidenceSupport !== undefined) {
+          const { exactExcerpt, ...metadata } = validateEvidenceSupport(row.evidenceSupport, { sourceId: row.sourceId })
+          support = metadata
+        }
+        if (kind === 'sources' && row.sourceCapture !== undefined)
+          capture = validateSourceCapture(row.sourceCapture, { sourceId: row.sourceId, contentHash: row.contentHash })
+        semantic[kind].set(id, { id, basisHash: semanticHash,
+          ...(kind === 'evidence' ? { sourceId: row.sourceId, status: row.reviewStatus,
+            decision: { status: row.reviewStatus,
+              reviewerId: row.reviewStatus === 'ACCEPTED' ? decision.acceptedBy ?? null : decision.rejectedBy ?? null,
+              reviewedAt: row.reviewStatus === 'ACCEPTED' ? decision.acceptanceTimestamp ?? null : decision.rejectionTimestamp ?? null,
+              rationale: decision.reviewRationale ?? null }, ...(support ? { support } : {}) }
+            : { sourceRef: row.sourceRef ?? null, contentHash: row.contentHash ?? null, ...(capture ? { capture } : {}) }) })
         if (kind === 'evidence' && candidateIds.has(id)) facts.set(id, row)
         const { extractedFact, ...compact } = row
         return { ...compact, semanticHash }
@@ -146,6 +172,13 @@ const compile = async (runtime, session, deadline, readBudget) => {
       fail('REVIEW_READ_UNAVAILABLE', 'The complete review population could not be verified. Refresh to retry.', 503)
     throw error
   })
+  for (const item of semantic.evidence.values()) {
+    if (!item.support) continue
+    const capture = semantic.sources.get(item.sourceId)?.capture
+    if (!capture || item.support.originalContentHash !== capture.originalContentHash
+      || item.support.captureTextHash !== capture.captureTextHash || item.support.end > capture.textLength)
+      fail('REVIEW_INVENTORY_INVALID', 'Recorded support does not match its complete source inventory.')
+  }
   const basisArgs = { control: runtime, candidates, reviews, reviewEpoch: pack.contradictionReviewEpoch,
     evidenceRows: [...facts.values()], session, readBudget: readBudget || (() => ({ maxTimeMS: remaining(deadline) })) }
   const basis = candidateIds.size ? await readContradictionReviewBasis(basisArgs) : null
@@ -164,6 +197,11 @@ const compile = async (runtime, session, deadline, readBudget) => {
   if (expectedEvidence > 0 && pack.evidenceReady !== true && pack.state?.evidenceReady !== true)
     fail('REVIEW_POPULATION_UNKNOWN', 'The current evidence readiness basis is unavailable.')
   const manifest = { policy: REVIEW_POPULATION_POLICY, refreshNeeded,
+    binding: { contractVersion: 'review-population-membership.v1',
+      ...Object.fromEntries(Object.entries(scope).map(([name, value]) => [name, key(value)])),
+      runtimeInstanceKey: runtime.runtimeInstanceKey,
+      rootRuntimeInstanceKey: runtime.revision?.rootRuntimeInstanceKey || runtime.runtimeInstanceKey,
+      revisionNumber: runtime.revision?.revisionNumber ?? null },
     evidence: [...semantic.evidence.values()].sort((a, b) => a.id.localeCompare(b.id)),
     sources: [...semantic.sources.values()].sort((a, b) => a.id.localeCompare(b.id)), contradictions }
   bound(manifest)
@@ -184,9 +222,49 @@ const publicReceipt = (receipt, populationHash) => ({ receiptId: receipt.receipt
   observedStateVersion: receipt.observedStateVersion, auditId: key(receipt.auditId),
   auditSignatureVersion: receipt.auditSignatureVersion,
   currency: receipt.populationHash === populationHash ? 'CURRENT' : 'STALE' })
+const recordedMembership = async (runtime, preview, session, deadline, readBudget) => {
+  const scope = scopeFor(runtime)
+  const stored = await RuntimeReviewCompletion.findOne({ ...scope, receiptId: preview.receiptId })
+    .session(session).setOptions(readOptions(deadline, readBudget)).lean()
+  if (!stored) fail('REVIEW_COMPLETION_PROOF_INVALID', 'The recorded Review population receipt is unavailable.', 503)
+  bound(stored.manifest)
+  if (stored.populationHash !== preview.populationHash || stored.populationHash !== snapshotHash(stored.manifest)
+    || stored.manifest?.policy !== stored.populationPolicy)
+    fail('REVIEW_COMPLETION_PROOF_INVALID', 'The recorded Review population manifest could not be verified.', 503)
+  // Older receipts remain historical records; never reconstruct their membership from today's rows.
+  if (stored.manifest?.binding === undefined) return { membershipStatus: 'LEGACY_NOT_RECORDED' }
+  const binding = stored.manifest.binding
+  const audit = await AuditLog.findOne({ _id: stored.auditId, resourceId: scope.runtimeInstanceId })
+    .session(session).setOptions(readOptions(deadline, readBudget)).lean()
+  if (binding?.contractVersion !== 'review-population-membership.v1'
+    || stored.contractVersion !== REVIEW_COMPLETION_VERSION || stored.authority !== 'VMF_UPDATE'
+    || Object.entries(scope).some(([name, value]) => binding[name] !== key(value))
+    || binding.runtimeInstanceKey !== stored.runtimeInstanceKey
+    || binding.rootRuntimeInstanceKey !== stored.rootRuntimeInstanceKey
+    || !audit || !AuditLog.hydrate(audit).verifySignature()
+    || audit.signatureVersion !== stored.auditSignatureVersion
+    || audit.action !== auditService.AUDIT_ACTIONS.RUNTIME_STATE_MUTATED
+    || audit.resourceType !== auditService.RESOURCE_TYPES.RuntimeInstance
+    || key(audit.actorUserId) !== key(stored.actorUserId)
+    || Object.entries(scope).some(([name, value]) => key(audit.scope?.[name]) !== key(value))
+    || audit.scope?.runtimeInstanceKey !== stored.runtimeInstanceKey
+    || audit.diff?.action !== 'REVIEW_COMPLETION' || audit.diff.receiptId !== stored.receiptId
+    || audit.diff.populationHash !== stored.populationHash || audit.diff.populationPolicy !== stored.populationPolicy
+    || audit.diff.stateVersion !== stored.observedStateVersion || audit.diff.rationale !== stored.rationale) {
+    fail('REVIEW_COMPLETION_PROOF_INVALID', 'The signed recorded Review population could not be verified.', 503)
+  }
+  return { membershipStatus: 'VERIFIED', membership: {
+    ...binding, policy: stored.populationPolicy, membershipHash: stored.populationHash,
+    observedStateVersion: stored.observedStateVersion, auditVerified: true, lockFrozen: false,
+    evidence: stored.manifest.evidence, sources: stored.manifest.sources, contradictions: stored.manifest.contradictions,
+  } }
+}
 const response = async (runtime, population, session, deadline, { replay = false, receipt = null, canComplete = false, readBudget } = {}) => {
   const history = await RuntimeReviewCompletion.find(scopeFor(runtime)).select('-manifest -payloadHash -requestKey')
     .sort({ completedAt: -1, _id: -1 }).limit(26).session(session).setOptions(readOptions(deadline, readBudget)).lean()
+  const latestMembership = history[0] ? await recordedMembership(runtime, history[0], session, deadline, readBudget) : null
+  const receiptMembership = receipt ? receipt.receiptId === history[0]?.receiptId ? latestMembership
+    : await recordedMembership(runtime, receipt, session, deadline, readBudget) : null
   return { contractVersion: REVIEW_COMPLETION_VERSION,
     scope: { ...Object.fromEntries(Object.entries(scopeFor(runtime)).map(([name, value]) => [name, key(value)])),
       runtimeInstanceKey: runtime.runtimeInstanceKey,
@@ -194,8 +272,8 @@ const response = async (runtime, population, session, deadline, { replay = false
     stateVersion: runtime.stateVersion, runtimeUpdatedAt: runtime.updatedAt,
     population: { ...population.summary, hash: population.populationHash },
     canComplete: canComplete && population.summary.complete && editable(runtime), replay,
-    receipt: receipt ? publicReceipt(receipt, population.populationHash) : null,
-    latestReceipt: history[0] ? publicReceipt(history[0], population.populationHash) : null,
+    receipt: receipt ? { ...publicReceipt(receipt, population.populationHash), ...receiptMembership } : null,
+    latestReceipt: history[0] ? { ...publicReceipt(history[0], population.populationHash), ...latestMembership } : null,
     history: { records: history.slice(0, 25).map((item) => publicReceipt(item, population.populationHash)),
       hasMore: history.length > 25, completeness: history.length > 25 ? 'PARTIAL' : 'COMPLETE' } }
 }

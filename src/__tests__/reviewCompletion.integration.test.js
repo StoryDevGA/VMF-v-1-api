@@ -13,6 +13,8 @@ import { getDiscoveryContradictionReview } from '../services/discoveryContradict
 import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
 import { createRuntimeStateCanonicalMappingManifest } from '../services/runtimeStateCanonicalSerializer.js'
 import { stageRuntimeStateSourceRollover } from '../services/runtimeStateSourceRolloverService.js'
+import { buildSourceCapture, buildEvidenceSupport, sourceEvidenceHash } from '../services/sourceEvidenceContract.js'
+import { snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
 
 // Authority simulator only: real Mongo transaction/audit/index proof, not production permission proof.
 let permit = true
@@ -90,6 +92,145 @@ const signoff = async (overrides = {}) => {
   return { requestKey: randomUUID(), expectedPopulationHash: read.population.hash,
     rationale: 'Explicit human review of the complete synthetic population.', confirm: true, ...overrides }
 }
+
+const capturedFixture = async () => {
+  const fixtureState = await fixture(Array(4).fill('ACCEPTED'))
+  const statements = ['A first original service statement.', 'A second original service statement.',
+    'A third original service statement.', 'A fourth original service statement.']
+  const captureText = statements.join('\n')
+  const capture = buildSourceCapture({ sourceId: 'source-one', originalContentHash: sourceEvidenceHash('<html>saved offline</html>'),
+    captureText, adapter: 'website-html-fetch-v1', extractionMethod: 'DECODED_HTML_STRIPPED_TEXT',
+    capturedAt: new Date().toISOString(), operation: 'WEBSITE_DECODED_TEXT_CAPTURE',
+    runId: randomUUID(), attemptId: randomUUID(), inputIndex: 0 })
+  await RuntimeEvidenceSource.collection.updateOne(scope, { $set: { sourceCapture: capture, contentHash: capture.originalContentHash } })
+  const objects = []
+  for (let index = 0; index < statements.length; index++) {
+    const metadata = { evidenceSupport: buildEvidenceSupport({ captureText, exactSegment: statements[index], sourceCapture: capture }),
+      reviewRationale: `Accepted as an explicit synthetic first-party source assertion ${index}.` }
+    await RuntimeEvidenceObject.collection.updateOne({ ...scope, evidenceObjectId: `evidence-${index}` }, { $set: metadata })
+    objects.push({ ...fixtureState.evidence[index], ...metadata })
+  }
+  await RuntimeInstance.collection.updateOne({ _id: ids.runtimeInstanceId }, { $set: {
+    'framework_state.evidence_pack.evidenceObjects': objects,
+  }, $unset: { 'framework_state.evidence_pack.contradictionReviews': '' } })
+  return { ...fixtureState, capture, objects }
+}
+
+test('recorded empty detector and four fully reconciled decisions create a signed immutable population receipt without invented history', async () => {
+  const { capture, objects, version } = await capturedFixture()
+  const before = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+  const basis = await getReviewCompletion(args)
+  expect(basis.population).toMatchObject({ completeness: 'COMPLETE', evidenceCount: 4, sourceCount: 1,
+    decisionCount: 4, pendingEvidence: 0, pendingFindings: 0, complete: true })
+  const result = await completeReview({ ...args, payload: await signoff() })
+  const read = await getReviewCompletion(args)
+  const membership = read.latestReceipt.membership
+  expect(read.latestReceipt).toMatchObject({ membershipStatus: 'VERIFIED', currency: 'CURRENT', receiptId: result.receipt.receiptId })
+  expect(membership).toMatchObject({ runtimeInstanceId: String(ids.runtimeInstanceId), runtimeInstanceKey,
+    revisionNumber: 1, observedStateVersion: version, membershipHash: result.receipt.populationHash,
+    auditVerified: true, lockFrozen: false })
+  expect(membership.evidence.map(item => item.id)).toEqual(objects.map(item => item.evidenceObjectId))
+  expect(membership.evidence[0]).toMatchObject({ sourceId: 'source-one', status: 'ACCEPTED',
+    decision: { reviewerId: String(ids.actorUserId), rationale: objects[0].reviewRationale },
+    support: { excerptHash: objects[0].evidenceSupport.excerptHash } })
+  expect(membership.sources[0].capture).toEqual(capture)
+  expect(JSON.stringify(membership)).not.toContain('exactExcerpt')
+  expect(JSON.stringify(membership)).not.toContain('extractedFact')
+  const after = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+  expect(after.framework_state).toEqual(before.framework_state)
+  expect(after.status).toBe('ACTIVE')
+  expect(after.framework_state.evidence_pack).not.toHaveProperty('contradictionReviews')
+  const stored = await RuntimeReviewCompletion.findOne({ receiptId: result.receipt.receiptId })
+  await expect(stored.updateOne({ rationale: 'Altered historical membership.' })).rejects.toThrow('append-only')
+})
+
+test.each(['missing-detector', 'missing-history-with-candidate', 'null-history', 'malformed-history'])(
+  'unknown %s cannot be replaced with an empty population', async kind => {
+  await fixture(['ACCEPTED', 'ACCEPTED'], { contradiction: kind === 'missing-history-with-candidate' ? 'CONFIRMED' : null })
+  const base = 'framework_state.evidence_pack'
+  await RuntimeInstance.collection.updateOne({ _id: ids.runtimeInstanceId }, kind === 'missing-detector'
+    ? { $unset: { [`${base}.discoveryHealth.contradictionCandidates`]: '' } }
+    : kind === 'missing-history-with-candidate' ? { $unset: { [`${base}.contradictionReviews`]: '' } }
+      : { $set: { [`${base}.contradictionReviews`]: kind === 'null-history' ? null : {} } })
+  await expect(getReviewCompletion(args)).rejects.toMatchObject({ code: 'REVIEW_POPULATION_UNKNOWN' })
+  expect(await RuntimeReviewCompletion.countDocuments()).toBe(0)
+  expect(await AuditLog.countDocuments()).toBe(0)
+})
+
+test('an extra canonical object outside a four-item display is never silently excluded', async () => {
+  await capturedFixture()
+  const existing = await RuntimeEvidenceObject.findOne(scope).lean()
+  const { _id, reviewRationale, acceptedBy, acceptanceTimestamp, ...extra } = existing
+  await RuntimeEvidenceObject.collection.insertOne({ ...extra, evidenceObjectId: 'outside-display', reviewStatus: 'PENDING' })
+  await expect(getReviewCompletion(args)).rejects.toMatchObject({ status: 409 })
+  await RuntimeInstance.collection.updateOne({ _id: ids.runtimeInstanceId }, { $push: {
+    'framework_state.evidence_pack.evidenceObjects': { evidenceObjectId: 'outside-display', sourceId: 'source-one', reviewStatus: 'PENDING' },
+  } })
+  // A legitimate fifth member is counted, rather than refused because a UI happened to show four.
+  const read = await getReviewCompletion(args)
+  expect(read.population).toMatchObject({ evidenceCount: 5, pendingEvidence: 1, complete: false })
+  expect(read.canComplete).toBe(false)
+})
+
+test.each(['decision-rationale', 'source-capture', 'support-span'])('changed %s makes the recorded membership stale', async kind => {
+  await capturedFixture()
+  const saved = await completeReview({ ...args, payload: await signoff() })
+  if (kind === 'decision-rationale') {
+    const reason = 'A separately changed synthetic reason for this source assertion.'
+    await RuntimeEvidenceObject.collection.updateOne({ ...scope, evidenceObjectId: 'evidence-0' }, { $set: { reviewRationale: reason } })
+    await RuntimeInstance.collection.updateOne({ _id: ids.runtimeInstanceId }, { $set: {
+      'framework_state.evidence_pack.evidenceObjects.0.reviewRationale': reason,
+    } })
+  } else if (kind === 'source-capture') {
+    await RuntimeEvidenceSource.collection.updateOne(scope, { $set: { 'sourceCapture.capturedAt': '2026-11-01T10:00:00.000Z' } })
+  } else {
+    const row = await RuntimeEvidenceObject.findOne({ ...scope, evidenceObjectId: 'evidence-0' }).lean()
+    const other = await RuntimeEvidenceObject.findOne({ ...scope, evidenceObjectId: 'evidence-1' }).lean()
+    await RuntimeEvidenceObject.collection.updateOne({ _id: row._id }, { $set: { evidenceSupport: other.evidenceSupport } })
+  }
+  const read = await getReviewCompletion(args)
+  expect(read.latestReceipt).toMatchObject({ receiptId: saved.receipt.receiptId, currency: 'STALE', membershipStatus: 'VERIFIED' })
+  expect(read.latestReceipt.membership.membershipHash).not.toBe(read.population.hash)
+})
+
+test.each(['audit-signature', 'audit-binding', 'manifest', 'binding-removed'])('tampered %s cannot produce verified membership', async kind => {
+  await capturedFixture()
+  const result = await completeReview({ ...args, payload: await signoff() })
+  if (kind === 'manifest') await RuntimeReviewCompletion.collection.updateOne({ receiptId: result.receipt.receiptId },
+    { $set: { 'manifest.evidence.0.sourceId': 'unrelated-source' } })
+  else if (kind === 'binding-removed') await RuntimeReviewCompletion.collection.updateOne({ receiptId: result.receipt.receiptId },
+    { $unset: { 'manifest.binding': '' } })
+  else if (kind === 'audit-signature') await AuditLog.collection.updateOne({ _id: new mongoose.Types.ObjectId(result.receipt.auditId) },
+    { $set: { signature: 'not-a-valid-signature' } })
+  else {
+    const audit = await AuditLog.findById(result.receipt.auditId)
+    audit.diff = { ...audit.diff, receiptId: randomUUID() }
+    audit.generateSignature()
+    await AuditLog.collection.replaceOne({ _id: audit._id }, audit.toObject())
+  }
+  await expect(getReviewCompletion(args)).rejects.toMatchObject({ code: 'REVIEW_COMPLETION_PROOF_INVALID', status: 503 })
+})
+
+test('an authentic historical-shaped manifest remains limited legacy data without reconstruction', async () => {
+  await capturedFixture()
+  const result = await completeReview({ ...args, payload: await signoff() })
+  const stored = await RuntimeReviewCompletion.findOne({ receiptId: result.receipt.receiptId }).lean()
+  const manifest = { policy: stored.manifest.policy, refreshNeeded: false,
+    evidence: stored.manifest.evidence.map(({ id, basisHash, status }) => ({ id, basisHash, status })),
+    sources: stored.manifest.sources.map(({ id, basisHash }) => ({ id, basisHash })), contradictions: [] }
+  const populationHash = snapshotHash(manifest)
+  // Synthetic historical format only, with its own valid hash and genuine model-signed audit.
+  await RuntimeReviewCompletion.collection.updateOne({ _id: stored._id }, { $set: { manifest, populationHash } })
+  const audit = await AuditLog.findById(stored.auditId)
+  audit.diff = { ...audit.diff, populationHash }
+  audit.generateSignature()
+  await AuditLog.collection.replaceOne({ _id: audit._id }, audit.toObject())
+  const read = await getReviewCompletion(args)
+  expect(read.latestReceipt).toMatchObject({ receiptId: stored.receiptId, membershipStatus: 'LEGACY_NOT_RECORDED', currency: 'STALE' })
+  expect(read.latestReceipt).not.toHaveProperty('membership')
+  expect((await RuntimeReviewCompletion.findById(stored._id).lean()).manifest).toEqual(manifest)
+  expect((await AuditLog.findById(stored.auditId)).verifySignature()).toBe(true)
+})
 test('one decided item out of twenty cannot complete regardless of displayed/filter population', async () => {
   await fixture(['ACCEPTED', ...Array(19).fill('PENDING')])
   const read = await getReviewCompletion(args)

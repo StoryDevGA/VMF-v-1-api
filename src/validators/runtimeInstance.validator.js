@@ -1,4 +1,5 @@
-import { researchConfigurationSelectorSchema } from '../services/researchConfigurationContract.js'
+import { researchConfigurationSelectorSchema, providerFreeSearchSelectorSchema, assertResearchDispatchPayload } from '../services/researchConfigurationContract.js'
+import { publicResearchSelectorSchema } from '../services/publicResearchContract.js'
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { postLockSubmissionSchema } from '../services/postLockEvidenceIntakeContract.js'
@@ -666,6 +667,7 @@ export const validateReviewRuntimeDiscoveryContradiction = createBodyValidator(r
 
 const reviewRuntimeDiscoveryEvidenceSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+  rationale: z.string().trim().min(10).max(2000).optional(),
   reviewStatus: z
     .string({ required_error: 'reviewStatus is required' })
     .trim()
@@ -702,6 +704,8 @@ const acceptRuntimeSectionSchema = z.object({
 }).strict()
 
 const executeRuntimeActionSchema = z.object({
+  publicResearch: publicResearchSelectorSchema.optional(),
+  providerFreeSearch: providerFreeSearchSelectorSchema.optional(),
   researchConfiguration: researchConfigurationSelectorSchema.optional(),
   controlledReplay: controlledReplaySelectorSchema.optional(),
   requestKey: acquisitionRequestKeySchema.optional(),
@@ -786,11 +790,21 @@ const getSectionKeyFromRuntimePath = (runtimePath) => {
 }
 
 const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchema.superRefine((data, ctx) => {
-  if (Object.hasOwn(data, 'researchConfiguration') && (actionKey !== 'BUILD_EVIDENCE_PACK' || !data.controlledReplay
+  if (Object.hasOwn(data, 'providerFreeSearch') && (!data.researchConfiguration || data.controlledReplay !== undefined
+    || actionKey !== 'BUILD_EVIDENCE_PACK' || !data.requestKey || data.inputs !== undefined || data.documentSources !== undefined
+    || Object.keys(data).some(key => !['researchConfiguration', 'providerFreeSearch', 'requestKey', 'expectedUpdatedAt',
+      'acquisitionProfile', 'predecessorRunId', 'predecessorExecutionAttemptId'].includes(key)))) ctx.addIssue({
+    code: z.ZodIssueCode.custom, path: ['providerFreeSearch'], message: 'Provider-free search requires its explicit unmixed saved fixture build.',
+  })
+  if (data.publicResearch) {
+    try { assertResearchDispatchPayload(data, actionKey) }
+    catch { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['publicResearch'], message: 'Public research requires its explicit saved server-issued request.' }) }
+  }
+  if (Object.hasOwn(data, 'researchConfiguration') && (actionKey !== 'BUILD_EVIDENCE_PACK' || (!data.controlledReplay && !data.providerFreeSearch && !data.publicResearch)
     || !data.requestKey || Boolean(data.predecessorRunId) !== Boolean(data.predecessorExecutionAttemptId) || data.inputs !== undefined || data.documentSources !== undefined)) ctx.addIssue({
     code: z.ZodIssueCode.custom, path: ['researchConfiguration'], message: 'Research dispatch requires an explicit unmixed controlled fixture build.',
   })
-  if (data.predecessorExecutionAttemptId !== undefined && (!data.researchConfiguration || !data.controlledReplay || !data.predecessorRunId)) ctx.addIssue({
+  if (data.predecessorExecutionAttemptId !== undefined && (!data.researchConfiguration || (!data.controlledReplay && !data.providerFreeSearch && !data.publicResearch) || !data.predecessorRunId)) ctx.addIssue({
     code: z.ZodIssueCode.custom, path: ['predecessorExecutionAttemptId'], message: 'An exact predecessor Attempt belongs only to an explicit research retry.',
   })
   if (Object.hasOwn(data, 'controlledReplay') && (!['BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'].includes(actionKey)

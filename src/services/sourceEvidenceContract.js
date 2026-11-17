@@ -87,8 +87,11 @@ export const validateSourceCapture = (value, options = {}) => {
   if (receipt.operation === 'CONTROLLED_HTML_REPLAY_CAPTURE') {
     if (value.adapter !== 'controlled-html-replay-v1' || value.extractionMethod !== 'DECODED_HTML_STRIPPED_TEXT'
       || !UUID.test(receipt.runId) || !UUID.test(receipt.attemptId) || receipt.inputIndex !== 0) fail()
+  } else if (receipt.operation === 'WEBSITE_DECODED_TEXT_CAPTURE') {
+    if (!(receipt.runId === null && receipt.attemptId === null)
+      && !(UUID.test(receipt.runId) && UUID.test(receipt.attemptId))) fail()
   } else if (receipt.runId !== null || receipt.attemptId !== null) fail()
-  integer(receipt.inputIndex, 0, 4)
+  integer(receipt.inputIndex, 0, receipt.operation === 'WEBSITE_DECODED_TEXT_CAPTURE' ? 9 : 4)
   if (sourceId !== undefined && sourceId !== value.sourceId
     || Object.hasOwn(options, 'contentHash') && contentHash !== value.originalContentHash) fail()
   return JSON.parse(JSON.stringify(value))

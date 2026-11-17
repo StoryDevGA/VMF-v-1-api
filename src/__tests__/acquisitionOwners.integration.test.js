@@ -1,6 +1,7 @@
 import { jest, beforeAll, afterAll, beforeEach, test, expect } from '@jest/globals'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import path from 'node:path'
 import mongoose from 'mongoose'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
 import RuntimeInstance from '../models/RuntimeInstance.js'
@@ -21,7 +22,7 @@ import auditService from '../services/auditService.js'
 import { createRuntimeStateCanonicalMappingManifest } from '../services/runtimeStateCanonicalSerializer.js'
 import { buildRuntimeStateNativeInitialFrameworkState } from '../services/runtimeStateNativeInitializationService.js'
 import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
-import { buildDiscoveryHealth } from '../services/discoveryIntelligenceService.js'
+import { buildDiscoveryHealth, buildWebsiteDiscoveryEvidenceFromDecodedHtml } from '../services/discoveryIntelligenceService.js'
 import { getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
 
 // Authority and path-registry simulators only. Persistence, source rollover,
@@ -35,7 +36,7 @@ await jest.unstable_mockModule('../services/runtimeInstanceService.js', () => ({
     const row = await RuntimeInstance.findOne({ runtimeInstanceKey: runtimeInstanceId,
       customerId: ids.customerId, tenantId: ids.tenantId }).select(projection).session(session).maxTimeMS(maxTimeMS).lean()
     if (!row) throw Object.assign(new Error('Not found'), { status: 404 })
-    return row
+    return { ...row, id: String(row._id) }
   },
 }))
 await jest.unstable_mockModule('../services/runtimeValidation/runtimeMutationValidator.js', () => ({
@@ -45,7 +46,8 @@ const rendererService = await import('../services/runtimeRendererService.js')
 await jest.unstable_mockModule('../services/runtimeRendererService.js', () => ({ ...rendererService,
   getRuntimeRenderer: jest.fn().mockResolvedValue({ actions: [{ actionKey: 'BUILD_EVIDENCE_PACK', enabled: true }] }),
 }))
-const { updateRuntimeDiscoveryInputs, reviewRuntimeDiscoveryContradiction } = await import('../services/runtimeStateMutationService.js')
+const { updateRuntimeDiscoveryInputs, reviewRuntimeDiscoveryContradiction, reviewRuntimeDiscoveryEvidence } = await import('../services/runtimeStateMutationService.js')
+const { listRuntimeStateEvidenceObjects } = await import('../services/runtimeStateRepository.js')
 const { executeRuntimeAction } = await import('../services/runtimeActionExecutionService.js')
 const { getAcquisitionRuns, getAcquisitionRun } = await import('../services/acquisitionRunService.js')
 const models = [RuntimeInstance, RuntimeAcquisitionRun, RuntimeEvidenceObject, RuntimeEvidenceSource,
@@ -258,6 +260,238 @@ test.each(owners)('actual %s owner saves Run, root, canonical sources/evidence a
   expect(replay).toMatchObject({ acquisitionRun: { runId: result.acquisitionRun.runId, replay: true, requiresRefresh: true } })
   expect([await RuntimeEvidenceSource.countDocuments(), await RuntimeEvidenceObject.countDocuments(), await AuditLog.countDocuments()]).toEqual(counts)
   expect((await RuntimeInstance.findById(ids.runtimeInstanceId)).stateVersion).toBe(root.stateVersion)
+})
+
+describe('captured website metadata save boundary (offline)', () => {
+  const originalFetch = globalThis.fetch, originalDns = globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__
+  const captureFixture = {
+    // Synthetic metadata and whitespace, never retained Parlon HTML.
+    html: '<title>Synthetic company provides reporting services</title>\n<meta name="description" content="The fictional provider supports secure reporting services">\n<h1>Synthetic reporting\n  platform services 😀</h1>\n<p>The synthetic business supplies reporting services to test customers in Ireland.</p>',
+    captureText: ' Synthetic company provides reporting services \n The fictional provider supports secure reporting services \n Synthetic reporting\n  platform services 😀 \n The synthetic business supplies reporting services to test customers in Ireland. ',
+  }
+  const url = 'https://capture-owner.example/'
+  const originalHash = `sha256:${createHash('sha256').update(captureFixture.html).digest('hex')}`
+  const legacyHash = createHash('sha256').update(JSON.stringify({ html: captureFixture.html })).digest('hex')
+  const websiteFixture = async () => {
+    const value = await fixture()
+    value.payload.inputs = { ...value.payload.inputs, companyWebsite: url, websiteSources: [url] }
+    delete value.payload.documentSources
+    return value
+  }
+  beforeEach(() => {
+    globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = jest.fn(async () => [{ address: '93.184.216.34', family: 4 }])
+    globalThis.fetch = jest.fn(async () => ({ ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'text/html' : key === 'content-length'
+        ? String(Buffer.byteLength(captureFixture.html)) : null }, text: async () => captureFixture.html }))
+  })
+  afterEach(() => { globalThis.fetch = originalFetch; globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDns })
+
+  test.each(['ACCEPTED', 'REJECTED'])('reasoned evidence review %s persists actor, rationale and signed audit without altering original support', async reviewStatus => {
+    const { payload } = await websiteFixture()
+    await updateRuntimeDiscoveryInputs({ ...args, payload })
+    const before = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    const target = await RuntimeEvidenceObject.findOne({ ...scope, current: true, evidenceSupport: { $exists: true } }).lean()
+    expect(target.evidenceSupport).toBeDefined()
+    const sourceBefore = await RuntimeEvidenceSource.findOne({ ...scope, current: true, sourceId: target.sourceId }).lean()
+    expect(sourceBefore.sourceCapture).toBeDefined()
+    const runsBefore = JSON.stringify(await RuntimeAcquisitionRun.find().lean())
+    const rationale = 'The exact original passage supports this bounded first-party source assertion; it is not independently verified.'
+    await reviewRuntimeDiscoveryEvidence({ ...args, auditRequest: { requestId: randomUUID() }, evidenceObjectId: target.evidenceObjectId,
+      payload: { expectedUpdatedAt: before.updatedAt.toISOString(), reviewStatus, rationale } })
+    const current = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    const saved = await RuntimeEvidenceObject.findOne({ ...scope, current: true, evidenceObjectId: target.evidenceObjectId }).lean()
+    expect(current.stateVersion).not.toBe(before.stateVersion)
+    expect(saved).toMatchObject({ reviewStatus, reviewRationale: rationale, evidenceSupport: target.evidenceSupport, extractedFact: target.extractedFact })
+    const actorField = reviewStatus === 'ACCEPTED' ? 'acceptedBy' : 'rejectedBy'
+    const timeField = reviewStatus === 'ACCEPTED' ? 'acceptanceTimestamp' : 'rejectionTimestamp'
+    expect(saved[actorField]).toBe(args.actorUserId)
+    expect(Number.isFinite(Date.parse(saved[timeField]))).toBe(true)
+    const page = await listRuntimeStateEvidenceObjects({ scopes: {
+      customer: { _id: String(ids.customerId) },
+      tenant: { _id: String(ids.tenantId), customerId: String(ids.customerId) },
+    }, runtimeInstanceId: key })
+    expect(page.evidenceObjects.find(row => row.evidenceObjectId === target.evidenceObjectId))
+      .toMatchObject({ reviewStatus, reviewRationale: rationale, [actorField]: args.actorUserId, [timeField]: saved[timeField] })
+    const sourceAfter = await RuntimeEvidenceSource.findOne({ ...scope, current: true, sourceId: target.sourceId }).lean()
+    expect(sourceAfter.sourceCapture).toEqual(sourceBefore.sourceCapture)
+    expect(sourceAfter.contentHash).toBe(sourceBefore.contentHash)
+    expect(JSON.stringify(await RuntimeAcquisitionRun.find().lean())).toBe(runsBefore)
+    const audit = await AuditLog.findOne({ 'diff.evidenceDecision.evidenceObjectId': target.evidenceObjectId })
+    expect(audit.diff.evidenceDecision).toMatchObject({ evidenceObjectId: target.evidenceObjectId, sourceId: target.sourceId,
+      reviewStatus, rationale, reviewedBy: args.actorUserId, reviewedAt: saved[timeField] })
+    expect(audit.verifySignature()).toBe(true)
+  })
+
+  test('reasoned evidence review required audit failure rolls back rationale, decision and all current source support', async () => {
+    const { payload } = await websiteFixture()
+    await updateRuntimeDiscoveryInputs({ ...args, payload })
+    const rootBefore = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    const target = await RuntimeEvidenceObject.findOne({ ...scope, current: true, evidenceSupport: { $exists: true } }).lean()
+    expect(target.evidenceSupport).toBeDefined()
+    const material = async () => JSON.stringify(await Promise.all([RuntimeInstance.find().lean(), RuntimeEvidenceSource.find().lean(),
+      RuntimeEvidenceObject.find().lean(), RuntimeGraphSnapshot.find().lean(), RuntimeGraphElement.find().lean(), AuditLog.find().lean()]))
+    const before = await material(), original = auditService.log.bind(auditService)
+    let reached = false
+    jest.spyOn(auditService, 'log').mockImplementation((entry, options) => {
+      if (entry.diff?.evidenceDecision) { reached = true; throw new Error('Synthetic reasoned review audit refusal') }
+      return original(entry, options)
+    })
+    await expect(reviewRuntimeDiscoveryEvidence({ ...args, evidenceObjectId: target.evidenceObjectId,
+      payload: { expectedUpdatedAt: rootBefore.updatedAt.toISOString(), reviewStatus: 'ACCEPTED', rationale: 'The exact original passage supports this source assertion.' } }))
+      .rejects.toMatchObject({ status: 500, code: 'RUNTIME_STATE_MUTATION_AUDIT_FAILED',
+        details: { reason: 'RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED' } })
+    expect(reached).toBe(true)
+    expect(await material()).toBe(before)
+  })
+
+  test.each(['stale', 'locked'])('reasoned evidence review %s basis refuses before a decision or audit save', async kind => {
+    const { payload } = await websiteFixture()
+    await updateRuntimeDiscoveryInputs({ ...args, payload })
+    const root = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    const target = await RuntimeEvidenceObject.findOne({ ...scope, current: true, evidenceSupport: { $exists: true } }).lean()
+    expect(target.evidenceSupport).toBeDefined()
+    if (kind === 'locked') await RuntimeInstance.collection.updateOne({ _id: ids.runtimeInstanceId }, { $set: { status: 'LOCKED', lockedAt: new Date() } })
+    const before = JSON.stringify(await RuntimeEvidenceObject.find().lean()), audits = await AuditLog.countDocuments()
+    await expect(reviewRuntimeDiscoveryEvidence({ ...args, evidenceObjectId: target.evidenceObjectId,
+      payload: { expectedUpdatedAt: kind === 'stale' ? '2026-01-01T00:00:00.000Z' : root.updatedAt.toISOString(),
+        reviewStatus: 'ACCEPTED', rationale: 'The exact original passage supports this source assertion.' } })).rejects.toMatchObject({ status: 409 })
+    expect(JSON.stringify(await RuntimeEvidenceObject.find().lean())).toBe(before)
+    expect(await AuditLog.countDocuments()).toBe(audits)
+  })
+
+  test.each(owners)('actual %s owner persists original website support and replays without refetching', async (_name, invoke) => {
+    const { stateVersion, payload } = await websiteFixture(), result = await invoke(payload)
+    expect(result.acquisitionRun).toMatchObject({ status: 'SUCCEEDED', canonicalSaved: true })
+    const root = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    expect(root.stateVersion).not.toBe(stateVersion)
+    const sourceId = root.framework_state.evidence_pack.lineage.sources.find(row => row.type === 'WEBSITE_ACQUISITION').sourceId
+    const source = await RuntimeEvidenceSource.findOne({ ...scope, current: true, sourceId }).lean()
+    expect(source).toMatchObject({ contentHash: originalHash, stateVersion: root.stateVersion,
+      sourceCapture: { originalContentHash: originalHash, captureReceipt: { operation: 'WEBSITE_DECODED_TEXT_CAPTURE',
+        runId: result.acquisitionRun.runId, attemptId: result.acquisitionRun.executionAttemptId, inputIndex: 0 } } })
+    expect(source.contentHash.slice(7)).not.toBe(legacyHash)
+    expect(root.framework_state.evidence_pack.sourceRegistry.find(row => row.sourceId === source.sourceId).sourceCapture)
+      .toEqual(source.sourceCapture)
+    const evidence = await RuntimeEvidenceObject.find({ ...scope, current: true, sourceId: source.sourceId }).lean()
+    expect(evidence).toHaveLength(4)
+    expect(root.framework_state.evidence_pack.lineage.sources.find(row => row.sourceId === source.sourceId).sourceCapture)
+      .toEqual(source.sourceCapture)
+    for (const row of evidence) {
+      expect(row.reviewStatus).toBe('PENDING')
+      expect(row.evidenceSupport.originalContentHash).toBe(originalHash)
+      expect(row.evidenceSupport.exactExcerpt).toBe(captureFixture.captureText.slice(row.evidenceSupport.start, row.evidenceSupport.end))
+    }
+    const receipt = await getAcquisitionRun({ ...args, runId: result.acquisitionRun.runId })
+    expect(receipt).toMatchObject({ status: 'SUCCEEDED', canonicalSaved: true })
+    expect(receipt.outcomes.find(row => row.kind === 'WEBSITE')).not.toHaveProperty('contentHash')
+    const storedRun = await RuntimeAcquisitionRun.findOne({ ...scope, runId: receipt.runId }).lean()
+    expect(storedRun.outcomes.find(row => row.kind === 'WEBSITE').contentHash).toBe(legacyHash)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    const counts = [await RuntimeEvidenceSource.countDocuments(), await RuntimeEvidenceObject.countDocuments(), await AuditLog.countDocuments()]
+    expect((await invoke(payload)).acquisitionRun).toMatchObject({ runId: receipt.runId, replay: true })
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect([await RuntimeEvidenceSource.countDocuments(), await RuntimeEvidenceObject.countDocuments(), await AuditLog.countDocuments()]).toEqual(counts)
+    for (const audit of await AuditLog.find()) expect(audit.verifySignature()).toBe(true)
+  })
+
+  test.each(owners)('actual %s owner rolls back captured website material when its required save audit fails', async (name, invoke) => {
+    const { stateVersion, payload } = await websiteFixture(), original = auditService.log.bind(auditService)
+    const failedAction = name === 'build-action' ? 'RUNTIME_ACTION_EXECUTED' : 'RUNTIME_STATE_MUTATED'
+    let reached = false
+    jest.spyOn(auditService, 'log').mockImplementation((entry, options) => {
+      if (entry.action === failedAction) { reached = true; throw new Error('Synthetic captured website save audit rejection') }
+      return original(entry, options)
+    })
+    await expect(invoke(payload)).rejects.toMatchObject({ details: { acquisitionRun: { status: 'FAILED', canonicalSaved: false } } })
+    expect(reached).toBe(true)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect((await RuntimeInstance.findById(ids.runtimeInstanceId)).stateVersion).toBe(stateVersion)
+    expect(await RuntimeEvidenceSource.countDocuments()).toBe(0)
+    expect(await RuntimeEvidenceObject.countDocuments()).toBe(0)
+    expect(await RuntimeGraphSnapshot.countDocuments()).toBe(0)
+    expect((await RuntimeAcquisitionRun.findOne()).status).toBe('FAILED')
+  })
+})
+
+const retainedWebsiteDescribe = process.env.VMF_RETAINED_WEBSITE_HTML ? describe : describe.skip
+retainedWebsiteDescribe('retained homepage section save boundary (offline)', () => {
+  const originalFetch = globalThis.fetch, originalDns = globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__
+  const url = 'https://neve.studio/'
+  let html, originalHash, expected, retainedBytes, historicalCapture
+  beforeEach(() => {
+    retainedBytes = fs.readFileSync(process.env.VMF_RETAINED_WEBSITE_HTML)
+    originalHash = `sha256:${createHash('sha256').update(retainedBytes).digest('hex')}`
+    expect(originalHash).toBe('sha256:23fa7b12a4f3270d21fc88cf42a499f2a982b583beb0df1a48c764b9a254e5f4')
+    historicalCapture = JSON.parse(fs.readFileSync(path.join(path.dirname(process.env.VMF_RETAINED_WEBSITE_HTML),
+      'final-readback.json'), 'utf8')).source.sourceCapture
+    html = retainedBytes.toString('utf8')
+    expected = buildWebsiteDiscoveryEvidenceFromDecodedHtml({ html, normalizedUrl: url, finalUrl: url,
+      acquiredAt: '2026-11-17T12:00:00.000Z', acquisitionProfile: 'STANDARD', recordSourceCapture: true,
+      contentTruncated: false, charactersRead: html.length, characterLimit: 320000 })
+    globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = jest.fn(async () => [{ address: '93.184.216.34', family: 4 }])
+    globalThis.fetch = jest.fn(async requested => {
+      expect(requested).toBe(url)
+      return { ok: true, status: 200, url, headers: { get: key => key === 'content-type' ? 'text/html'
+        : key === 'content-length' ? String(retainedBytes.length) : null }, text: async () => html }
+    })
+  })
+  afterEach(() => { globalThis.fetch = originalFetch; globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDns })
+  const retainedFixture = async () => {
+    const value = await fixture()
+    value.payload.inputs = { ...value.payload.inputs, companyWebsite: url, websiteSources: [url] }
+    delete value.payload.documentSources
+    return value
+  }
+  test.each(owners)('actual %s owner saves retained section support with fresh lineage and exact replay', async (_name, invoke) => {
+    const { payload } = await retainedFixture(), result = await invoke(payload)
+    const root = await RuntimeInstance.findById(ids.runtimeInstanceId).lean()
+    const sourceId = root.framework_state.evidence_pack.lineage.sources.find(row => row.type === 'WEBSITE_ACQUISITION').sourceId
+    const source = await RuntimeEvidenceSource.findOne({ ...scope, current: true, sourceId }).lean()
+    expect(source.sourceCapture).toMatchObject({ originalContentHash: originalHash,
+      captureTextHash: expected.source.sourceCapture.captureTextHash,
+      captureReceipt: { runId: result.acquisitionRun.runId, attemptId: result.acquisitionRun.executionAttemptId } })
+    expect(source.sourceCapture.captureTextHash).not.toBe(historicalCapture.captureTextHash)
+    expect(source.sourceCapture.captureReceipt.runId).not.toBe('1053a846-4f05-449c-b352-48d40d1ded3e')
+    const evidence = await RuntimeEvidenceObject.find({ ...scope, current: true, sourceId: source.sourceId }).lean()
+    expect(evidence).toHaveLength(4)
+    for (const row of evidence) {
+      expect(row.reviewStatus).toBe('PENDING')
+      const support = expected.evidenceObjects.find(item => item.evidenceObjectId === row.evidenceObjectId)?.evidenceSupport
+      expect(row.evidenceSupport).toEqual(support)
+      expect(row.stateVersion).toBe(root.stateVersion)
+    }
+    const consultancy = evidence.find(row => row.extractedFact.includes('Your expertise shouldn’t'))
+    expect(consultancy.evidenceSupport.exactExcerpt).toContain('generative AI')
+    expect(consultancy.evidenceSupport.exactExcerpt).toContain('up-skill')
+    expect(evidence.map(row => row.extractedFact).join('\n')).not.toMatch(/&#(?:187|8217);/)
+    const receipt = await getAcquisitionRun({ ...args, runId: result.acquisitionRun.runId })
+    expect(receipt).toMatchObject({ status: 'SUCCEEDED', canonicalSaved: true, outputStateVersion: root.stateVersion })
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    const counts = [await RuntimeEvidenceSource.countDocuments(), await RuntimeEvidenceObject.countDocuments(), await AuditLog.countDocuments()]
+    expect((await invoke(payload)).acquisitionRun).toMatchObject({ runId: receipt.runId, replay: true })
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect([await RuntimeEvidenceSource.countDocuments(), await RuntimeEvidenceObject.countDocuments(), await AuditLog.countDocuments()]).toEqual(counts)
+    for (const audit of await AuditLog.find()) expect(audit.verifySignature()).toBe(true)
+    expect(fs.readFileSync(process.env.VMF_RETAINED_WEBSITE_HTML)).toEqual(retainedBytes)
+  })
+  test.each(owners)('actual %s owner rolls back retained section material on required save audit failure', async (name, invoke) => {
+    const { payload, stateVersion } = await retainedFixture(), original = auditService.log.bind(auditService)
+    const failedAction = name === 'build-action' ? 'RUNTIME_ACTION_EXECUTED' : 'RUNTIME_STATE_MUTATED'
+    let reached = false
+    jest.spyOn(auditService, 'log').mockImplementation((entry, options) => {
+      if (entry.action === failedAction) { reached = true; throw new Error('Synthetic retained section save audit rejection') }
+      return original(entry, options)
+    })
+    await expect(invoke(payload)).rejects.toMatchObject({ details: { acquisitionRun: { status: 'FAILED', canonicalSaved: false } } })
+    expect(reached).toBe(true)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect((await RuntimeInstance.findById(ids.runtimeInstanceId)).stateVersion).toBe(stateVersion)
+    expect(await RuntimeEvidenceSource.countDocuments()).toBe(0)
+    expect(await RuntimeEvidenceObject.countDocuments()).toBe(0)
+    expect(await RuntimeGraphSnapshot.countDocuments()).toBe(0)
+    expect((await RuntimeAcquisitionRun.findOne()).status).toBe('FAILED')
+    expect(fs.readFileSync(process.env.VMF_RETAINED_WEBSITE_HTML)).toEqual(retainedBytes)
+  })
 })
 
 test.each(owners)('actual %s owner rolls legacy sources forward, preserves failed retry linkage and replaces changed success', async (_name, invoke) => {

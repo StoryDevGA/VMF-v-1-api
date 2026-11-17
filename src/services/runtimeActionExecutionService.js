@@ -1,12 +1,17 @@
 import { assertResearchDispatchPayload } from './researchConfigurationContract.js'
-import { resolveResearchDispatchConfiguration } from './researchConfigurationService.js'
+import { resolveResearchDispatchConfiguration, loadResearchConfigurationForReceipt } from './researchConfigurationService.js'
+import { resolvePublicResearchExecution, executePublicResearchOperations } from './publicResearchOrchestrationService.js'
+import { PUBLIC_RESEARCH_RUN_VERSION } from './publicResearchContract.js'
 import mongoose from 'mongoose'
 import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation, controlledReplayIsolationCas,
   controlledReplayIsolationWrite, controlledReplayIsolationAudit, controlledReplayIsolationRollback } from './controlledReplayIsolationService.js'
-import { resolveControlledReplayAcquisition, assertControlledReplayCurrent } from './controlledReplayAcquisitionService.js'
+import { resolveControlledReplayAcquisition, assertControlledReplayCurrent, PROVIDER_FREE_SEARCH_FIXTURE,
+  dispatchProviderFreeSearchFixture, loadProviderFreeSearchFixture } from './controlledReplayAcquisitionService.js'
 import { resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution,
   permitsLocalDiscoveryCandidateAcquisition, fenceInstalledDiscoveryPolicy } from './discoveryPolicyContract.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
+  replayRegisteredProviderFreeSearchRequest, recordProviderFreeTavilyReceipt,
+  replayPublicResearchRequest, reservePublicResearchOperation, recordPublicResearchOperation, assertPublicResearchOperationCurrent,
   recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing, assertAcquisitionResearchConfigurationCurrent } from './acquisitionRunService.js'
 import { assertCustomerSectionTarget, buildRuntimeManagedSourceReceipt } from './runtimeManagedSectionService.js'
 import { FrameworkPackage, RuntimeInstance } from '../models/index.js'
@@ -1629,6 +1634,7 @@ const persistActionWithAudit = async ({
     let graphLifecycle = null
     let sourceRollover = null
     const persist = async (session) => {
+        acquisitionContext?.assertPublicResearchDeadline?.()
         await assertAcquisitionResearchConfigurationCurrent(acquisitionContext, session, true)
         if (freezeEvidence && session?.inTransaction?.() !== true) throw buildActionError({
           status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Lock evidence membership requires transactional storage.', reason: 'LOCK_MEMBERSHIP_TRANSACTION_REQUIRED',
@@ -1864,6 +1870,30 @@ const persistActionWithAudit = async ({
   return updatedRuntimeInstance
 }
 
+// Shared with the saved-configuration projection: eligibility must reflect the
+// actual package, entitlement, renderer declaration and lifecycle action gate.
+export const assertProviderFreeSearchStartAction = async ({ runtimeInstanceId, scopes, actorUserId }) => {
+  const runtime = await resolveRuntimeInstanceDocument({ runtimeInstanceId })
+  assertSupportedRuntimeType(runtime)
+  const customerId = toIdString(runtime.customerId), tenantId = toIdString(runtime.tenantId)
+  await assertRuntimePermission({ actorUserId, scopes, customerId, tenantId, permission: 'VMF_UPDATE' })
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  await assertFeatureEntitlement({ customerId, customer, feature: getFeatureForRuntimeType(runtime.runtimeType) })
+  const frameworkPackage = await FrameworkPackage.findById(runtime.packageId)
+  if (!frameworkPackage) throw buildActionError({ status: 404, code: 'NOT_FOUND', message: 'Framework package not found.',
+    reason: RUNTIME_INSTANCE_ERROR_REASONS.PACKAGE_NOT_FOUND })
+  const policyResolution = await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage, runtimeInstance: runtime })
+  if (policyResolution.status !== 'LEGACY_FALLBACK'
+    && !permitsLocalDiscoveryCandidateAcquisition({ frameworkPackage, resolution: policyResolution })) throw buildActionError({
+    status: 409, code: 'CONFLICT', message: 'Discovery configuration is awaiting verification.', reason: policyResolution.reason })
+  const renderer = await getRuntimeRenderer({ scopes, runtimeInstanceId })
+  resolveRendererAction({ renderer, actionKey: 'BUILD_EVIDENCE_PACK' })
+  const gate = getRuntimeActionStateGate({ actionKey: 'BUILD_EVIDENCE_PACK', frameworkPackage,
+    runtimeInstance: runtime, frameworkState: runtime.framework_state })
+  if (!gate.allowed) throw buildActionError({ status: 409, code: 'CONFLICT', message: 'Runtime action is not currently executable.',
+    reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE })
+}
+
 export const executeRuntimeAction = async ({
   actionKey,
   actorUserId,
@@ -1877,6 +1907,34 @@ export const executeRuntimeAction = async ({
 
   assertResearchDispatchPayload(payload, normalizedActionKey)
   assertActionSupported(normalizedActionKey)
+
+  if (payload?.publicResearch) {
+    const replay = await replayPublicResearchRequest({ runtimeInstanceId, actorUserId, scopes, payload, auditRequest,
+      actionKey: normalizedActionKey })
+    if (replay) return { acquisitionRun: replay }
+  }
+
+  if (payload?.providerFreeSearch) {
+    const selector = payload.providerFreeSearch
+    if (selector.fixtureId !== PROVIDER_FREE_SEARCH_FIXTURE.fixtureId || selector.fixtureVersion !== PROVIDER_FREE_SEARCH_FIXTURE.fixtureVersion
+      || selector.fixtureFileSha256 !== PROVIDER_FREE_SEARCH_FIXTURE.fixtureFileSha256) throw buildActionError({
+      status: 409, code: 'CONFLICT', message: 'Provider-free fixture identity changed.', reason: 'PROVIDER_FREE_SEARCH_ASSET_UNVERIFIED' })
+    await loadProviderFreeSearchFixture()
+    const args = { runtimeInstanceId, actorUserId, scopes, payload, auditRequest }
+    const replay = await replayRegisteredProviderFreeSearchRequest(args)
+    if (replay) return { acquisitionRun: replay }
+    await assertProviderFreeSearchStartAction(args)
+    const { configuration } = await loadResearchConfigurationForReceipt(args)
+    if (!configuration || configuration.settings.startingUrls.length !== 1
+      || configuration.settings.startingUrls[0] !== PROVIDER_FREE_SEARCH_FIXTURE.targetUrl
+      || payload.acquisitionProfile !== undefined && configuration.coverage !== payload.acquisitionProfile) throw buildActionError({ status: 409, code: 'CONFLICT',
+      message: 'Provider-free fixture settings changed.', reason: 'RESEARCH_FIXTURE_SETTINGS_UNSUPPORTED' })
+    const fixture = await dispatchProviderFreeSearchFixture({ selector: payload.researchConfiguration, settings: configuration.settings })
+    return { acquisitionRun: await recordProviderFreeTavilyReceipt({ ...args, payload: { requestKey: payload.requestKey,
+      expectedUpdatedAt: payload.expectedUpdatedAt, fixture,
+      ...(payload.predecessorRunId ? { predecessorRunId: payload.predecessorRunId,
+        predecessorExecutionAttemptId: payload.predecessorExecutionAttemptId } : {}) } }) }
+  }
 
   const runtimeInstance = await resolveRuntimeInstanceDocument({ runtimeInstanceId })
 
@@ -1930,7 +1988,14 @@ export const executeRuntimeAction = async ({
   const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
     ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest, controlledContext }) : null
   if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
-  if (payload?.researchConfiguration) acquisitionContext.researchConfiguration = await resolveResearchDispatchConfiguration({
+  if (payload?.publicResearch) {
+    const { configuration } = await loadResearchConfigurationForReceipt({ scopes, actorUserId, runtimeInstanceId })
+    acquisitionContext.scopes = scopes
+    acquisitionContext.researchConfiguration = configuration
+    acquisitionContext.publicResearchExecution = await resolvePublicResearchExecution({ payload, configuration,
+      runtimeInstance, actorUserId, controlledContext })
+    acquisitionContext.publicResearchExecution.assertActionAvailable = () => assertProviderFreeSearchStartAction({ runtimeInstanceId, scopes, actorUserId })
+  } else if (payload?.researchConfiguration) acquisitionContext.researchConfiguration = await resolveResearchDispatchConfiguration({
     payload, fixtureUrl: controlledContext.descriptor.binding.fixture.sourceUrl, scopes, actorUserId, runtimeInstanceId,
   })
   if (controlledContext) assertControlledReplayCurrent(controlledContext, runtimeInstance, payload)
@@ -1987,19 +2052,42 @@ export const executeRuntimeAction = async ({
       runtimeInstance,
     })
   } else if (isDiscoveryAction(normalizedActionKey)) {
-    const build = () => applyRuntimeDiscoveryAction({
+    const build = async () => {
+      let discoveryPayload = payload
+      if (acquisitionContext?.publicResearchExecution) {
+        await executePublicResearchOperations({ context: acquisitionContext, execution: acquisitionContext.publicResearchExecution,
+          reserve: input => reservePublicResearchOperation(acquisitionContext, input),
+          complete: (ordinal, patch) => recordPublicResearchOperation(acquisitionContext, ordinal, patch),
+          assertActive: () => assertPublicResearchOperationCurrent(acquisitionContext) })
+        if (!acquisitionContext.publicResearchMaySave) return null
+        const urls = [...acquisitionContext.publicResearchCaptures.keys()]
+        discoveryPayload = { ...payload, acquisitionProfile: acquisitionContext.researchConfiguration.coverage,
+          inputs: { ...acquisitionContext.researchConfiguration.context, companyWebsite: urls[0], websiteSources: urls } }
+      }
+      return applyRuntimeDiscoveryAction({
       actionKey: normalizedActionKey,
       actorUserId,
-      payload,
+      payload: discoveryPayload,
       runtimeInstance,
       controlledContext,
       acquisitionExecution: acquisitionContext,
-    })
+      })
+    }
     resolvedTransition = acquisitionContext ? await executeAcquisitionBuild(acquisitionContext, build) : await build()
+    if (acquisitionContext?.publicResearchExecution && !resolvedTransition) {
+      await withAcquisitionTransaction(session => recordAcquisitionTerminal({ context: acquisitionContext, session }), acquisitionContext)
+      return { acquisitionRun: await readCommittedAcquisition(acquisitionContext) }
+    }
     if (acquisitionContext) acquiredPack = resolvedTransition.nextFrameworkState.evidence_pack
     if (acquisitionContext) {
       bindAcquisitionSourceProcessing(acquisitionContext, acquiredPack)
       acquiredPack.acquisition.runId = acquisitionContext.runId
+      if (acquisitionContext.row.contractVersion === PUBLIC_RESEARCH_RUN_VERSION) {
+        delete acquiredPack.acquisition.websiteAcquisition
+        acquiredPack.acquisition.publicResearch = { contractVersion: PUBLIC_RESEARCH_RUN_VERSION,
+          mode: acquisitionContext.row.publicResearch.plan.mode, planHash: acquisitionContext.row.publicResearch.plan.planHash,
+          receiptHash: acquisitionContext.row.publicResearch.ledgerHash }
+      }
     }
   }
   resolvedTransition = rebuildRuntimeIntelligenceGraphForAction({

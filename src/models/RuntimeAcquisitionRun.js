@@ -1,5 +1,7 @@
-import { validateResearchRunConfiguration } from '../services/researchConfigurationContract.js'
+import { validateResearchRunConfiguration, validateProviderFreeSearchRun,
+  PROVIDER_FREE_SEARCH_RUN_VERSION, PROVIDER_FREE_SEARCH_PLANNER_VERSION } from '../services/researchConfigurationContract.js'
 import mongoose from 'mongoose'
+import { PUBLIC_RESEARCH_RUN_VERSION, PUBLIC_RESEARCH_PLANNER_VERSION, validatePublicResearchRun } from '../services/publicResearchContract.js'
 import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance } from '../services/controlledReplayContract.js'
 
 export const ACQUISITION_RUN_VERSION = 'acquisition-run.v1'
@@ -12,12 +14,12 @@ const text = maxlength => ({ type: String, required: true, maxlength, immutable:
 const id = ref => ({ type: mongoose.Schema.Types.ObjectId, ref, required: true, immutable: true })
 const hash = { ...text(64), match: /^[a-f0-9]{64}$/ }
 const inputSchema = new mongoose.Schema({
-  kind: { ...text(12), enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED'] },
+  kind: { ...text(12), enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED', 'SEARCH', 'REGISTRY'] },
   inputIndex: { type: Number, required: true, min: 0, max: 9, immutable: true },
   contentHash: hash,
 }, { _id: false, strict: 'throw' })
 const outcomeSchema = new mongoose.Schema({
-  kind: { type: String, required: true, enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED'] },
+  kind: { type: String, required: true, enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED', 'SEARCH', 'REGISTRY'] },
   inputIndex: { type: Number, required: true, min: 0, max: 9 },
   status: { type: String, required: true, enum: ['SUCCEEDED', 'FAILED', 'UNATTEMPTED', 'CANCELLED'] },
   sourceId: { type: String, maxlength: 160, match: /^[A-Za-z0-9_-]+$/ },
@@ -32,8 +34,11 @@ const schema = new mongoose.Schema({
   executionAttemptId: { ...text(36), match: uuid },
   requestFingerprint: hash, plannerFingerprint: hash,
   researchConfiguration: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true },
-  contractVersion: { ...text(80), enum: [ACQUISITION_RUN_VERSION, CONTROLLED_ACQUISITION_RUN_VERSION] },
-  plannerVersion: { ...text(80), enum: [ACQUISITION_PLANNER_VERSION, CONTROLLED_ACQUISITION_PLANNER_VERSION] },
+  providerFreeSearch: { type: mongoose.Schema.Types.Mixed, default: undefined, immutable: true, select: false },
+  publicResearch: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
+  receiptRecorded: { type: Boolean, default: undefined },
+  contractVersion: { ...text(80), enum: [ACQUISITION_RUN_VERSION, CONTROLLED_ACQUISITION_RUN_VERSION, PROVIDER_FREE_SEARCH_RUN_VERSION, PUBLIC_RESEARCH_RUN_VERSION] },
+  plannerVersion: { ...text(80), enum: [ACQUISITION_PLANNER_VERSION, CONTROLLED_ACQUISITION_PLANNER_VERSION, PROVIDER_FREE_SEARCH_PLANNER_VERSION, PUBLIC_RESEARCH_PLANNER_VERSION] },
   controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined, immutable: true,
     set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(value) },
   actorUserId: id('User'), authority: { ...text(80), enum: ['VMF_UPDATE'] },
@@ -64,10 +69,41 @@ schema.index({ customerId: 1, tenantId: 1, runtimeInstanceId: 1, createdAt: -1, 
 schema.index({ customerId: 1, tenantId: 1, runtimeInstanceId: 1, runId: 1 },
   { unique: true, name: 'unique_scoped_acquisition_run' })
 schema.pre('validate', function () {
+  if (this.publicResearch !== undefined && this.contractVersion !== PUBLIC_RESEARCH_RUN_VERSION)
+    this.invalidate('publicResearch', 'Public Research data requires its own contract.')
   if (this.predecessorExecutionAttemptId !== undefined && (!this.researchConfiguration || !this.predecessorRunId)
     || this.researchConfiguration && Boolean(this.predecessorRunId) !== Boolean(this.predecessorExecutionAttemptId))
     this.invalidate('predecessorExecutionAttemptId', 'Research retry requires its exact predecessor Run and Attempt.')
   try { validateResearchRunConfiguration(this) } catch { this.invalidate('researchConfiguration', 'Research configuration must bind this controlled Run.') }
+  if (this.contractVersion === PUBLIC_RESEARCH_RUN_VERSION) {
+    try {
+      const row = this.toObject({ depopulate: true })
+      validatePublicResearchRun(row)
+      if (row.publicResearch.plan.mode === 'OFFLINE') {
+        const descriptor = validateStoredControlledReplayProvenance(row.controlledReplayProvenance, {
+          customerId: String(row.customerId), tenantId: String(row.tenantId), runtimeInstanceId: String(row.runtimeInstanceId),
+          runtimeInstanceKey: row.runtimeInstanceKey })
+        if (descriptor.binding.basisStateVersion !== row.basisStateVersion || descriptor.binding.actorUserId !== String(row.actorUserId)
+          || row.publicResearch.plan.startingUrls.length !== 1 || row.publicResearch.plan.startingUrls[0] !== descriptor.binding.fixture.sourceUrl)
+          throw new Error('Controlled scope changed.')
+      }
+    } catch { this.invalidate('publicResearch', 'Public Research phase, scope or receipt is invalid.') }
+    return
+  }
+  if (this.contractVersion === PROVIDER_FREE_SEARCH_RUN_VERSION) {
+    try { validateProviderFreeSearchRun(this) } catch { this.invalidate('providerFreeSearch', 'Provider-free search receipt must bind its exact Run.') }
+    const terminal = ACQUISITION_TERMINAL_STATES.includes(this.status)
+    if (this.active === terminal || terminal !== Boolean(this.completedAt)
+      || this.status !== 'QUEUED' && (!this.startedAt || !this.startAuditId || !this.startAuditSignatureVersion)
+      || terminal && (!this.terminalAuditId || !this.terminalAuditSignatureVersion)
+      || !terminal && (this.receiptRecorded !== undefined || this.canonicalSaved !== undefined || this.outcomes !== undefined
+        || this.terminalAuditId || this.saveAuditId || this.outputStateVersion)
+      || Buffer.byteLength(JSON.stringify(this.toObject())) > 512 * 1024) this.invalidate('status', 'Provider-free receipt phase or bound is invalid.')
+    return
+  }
+  if (this.providerFreeSearch !== undefined || this.receiptRecorded !== undefined
+    || this.inputs?.some(item => ['SEARCH', 'REGISTRY'].includes(item.kind)) || this.outcomes?.some(item => ['SEARCH', 'REGISTRY'].includes(item.kind)))
+    this.invalidate('providerFreeSearch', 'Search receipt fields require their own contract.')
   const terminal = ACQUISITION_TERMINAL_STATES.includes(this.status)
   const controlled = this.contractVersion === CONTROLLED_ACQUISITION_RUN_VERSION
   if (controlled) {

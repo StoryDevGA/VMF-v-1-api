@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { createHash } from 'node:crypto'
+import { serializeRuntimeStateLegacyDomains } from './runtimeStateCanonicalSerializer.js'
 import { projectPostLockOrigin, assertPostLockOriginPairs } from './postLockSuccessorAdmissionContract.js'
 import { readContradictionReviewBasis } from './contradictionReviewBasis.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
@@ -30,7 +32,7 @@ import {
   RUNTIME_SECTION_DETAIL_ROOT_KEYS,
   RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS,
 } from '../models/RuntimeStateSection.js'
-import { isBoundedSafeJson } from '../models/runtimeStateSchemas.js'
+import { isBoundedSafeJson, RUNTIME_STATE_VERSION_PATTERN } from '../models/runtimeStateSchemas.js'
 import { createSectionHistoryReadContext } from './runtimeSectionHistoryContract.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import {
@@ -200,6 +202,7 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
 // Public evidence reads retain incompatible origin metadata only for validation.
 const RUNTIME_STATE_V2_PUBLIC_EVIDENCE_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  reviewRationale: 1, acceptedBy: 1, acceptanceTimestamp: 1, rejectedBy: 1, rejectionTimestamp: 1,
   migrationReceiptId: 1,
   postLockOrigin: 1,
   postLockAssociation: 1,
@@ -1190,6 +1193,15 @@ const serializeEvidenceObject = (row, stateVersion) => {
     { sourceId: row.sourceId }) : null,
   evidenceSupportAvailability: row.evidenceSupport !== undefined ? 'RECORDED' : 'NOT_RECORDED',
   reviewStatus: normalizeText(row.reviewStatus),
+   ...Object.fromEntries(['reviewRationale', 'acceptedBy', 'acceptanceTimestamp', 'rejectedBy', 'rejectionTimestamp']
+     .filter(field => row[field] !== undefined).map(field => {
+       const value = row[field], max = field === 'reviewRationale' ? 2000 : field.endsWith('By') ? 160 : 100
+       if (typeof value !== 'string' || value.length > max || field === 'reviewRationale' && value.trim().length < 10) {
+         throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
+           message: 'The recorded evidence decision metadata is invalid.' })
+       }
+       return [field, value]
+     })),
   acceptanceState: normalizeText(row.acceptanceState),
   validationStatus: normalizeText(row.validationStatus),
   confidence: row.confidence && typeof row.confidence === 'object'
@@ -1692,6 +1704,42 @@ export const listRuntimeStateSources = async ({
   }, 'runtime_state_v2.source_registry')
 }
 
+// Absence alone is not an empty-state proof: retain missing-data protection after acquisition.
+const hasNativeInitialEmptyEvidence = async (control, totalReceipt, args) => {
+  if (totalReceipt?.value !== 0 || totalReceipt.capped !== false
+    || !RUNTIME_STATE_VERSION_PATTERN.test(control.stateVersion || '')) return false
+  const identity = { customerId: new mongoose.Types.ObjectId(control.customerId),
+    tenantId: new mongoose.Types.ObjectId(control.tenantId), runtimeInstanceId: new mongoose.Types.ObjectId(control.id),
+    runtimeInstanceKey: control.runtimeInstanceKey }
+  const [receipts, sources, evidence] = await Promise.all([
+    readMany({ collectionName: 'runtime_state_migration_receipts',
+      filter: { ...identity, assignedStateVersion: control.stateVersion }, limit: 2,
+      projection: { operationType: 1, status: 1, scopeDigest: 1, idempotencyKey: 1, targetSelectionRef: 1,
+        logicalSources: 1 } }),
+    readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES,
+      filter: buildChildFilter({ control }), projection: { _id: 1 }, limit: 1 }),
+    readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
+      filter: buildChildFilter({ control }), projection: { _id: 1 }, limit: 1 }),
+  ])
+  if (receipts.length !== 1 || sources.length || evidence.length) return false
+  const receipt = receipts[0]
+  const digest = `sha256:${createHash('sha256').update([control.customerId, control.tenantId,
+    control.id, control.runtimeInstanceKey].map(String).join('\n')).digest('hex')}`
+  const domains = receipt.logicalSources
+  const emptyHash = serializeRuntimeStateLegacyDomains({ rawBsonBytes: 0, sections: {},
+    evidencePack: { sourceRegistry: [], evidenceObjects: [] },
+    intelligenceGraph: { graphVersion: 'initial-empty', nodes: [], edges: [] } }).domains.evidencePack.sourceHash
+  const empty = Array.isArray(domains) && domains.filter(row => row.logicalPath === 'framework_state.evidence_pack')
+  if (receipt.operationType !== 'NATIVE_INITIALIZATION' || receipt.status !== 'VERIFIED'
+    || receipt.scopeDigest !== digest || receipt.idempotencyKey !== `ss014:native-initialization:${digest}`
+    || receipt.targetSelectionRef?.scopeDigest !== digest
+    || receipt.targetSelectionRef?.bindingRef !== `native-runtime:${control.runtimeInstanceKey}`
+    || !empty || empty.length !== 1 || empty[0].recordCount !== 0 || empty[0].sourceHash !== emptyHash
+    || JSON.stringify(empty[0].targetCollections) !== JSON.stringify(['runtime_evidence_sources', 'runtime_evidence_objects'])) return false
+  const current = await getControl(args)
+  return current.stateVersion === control.stateVersion && String(current.updatedAt) === String(control.updatedAt)
+}
+
 export const listRuntimeStateEvidenceObjects = async ({
   scopes,
   runtimeInstanceId,
@@ -1766,7 +1814,8 @@ export const listRuntimeStateEvidenceObjects = async ({
       missingMessage: 'The selected source has no consistent state-version receipt.' })
   }
   if (rows.length === 0 && normalizedPage === 1 && !query && !selectedSourceId
-    && !normalizeText(reviewStatus) && !normalizeText(acceptanceState)) {
+    && !normalizeText(reviewStatus) && !normalizeText(acceptanceState)
+    && !await hasNativeInitialEmptyEvidence(control, totalReceipt, { scopes, runtimeInstanceId })) {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_MISSING,
       message: 'Runtime State Storage V2 evidence is unavailable.',

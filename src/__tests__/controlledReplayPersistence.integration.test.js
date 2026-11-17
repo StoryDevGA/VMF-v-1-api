@@ -18,31 +18,38 @@ jest.unstable_mockModule('../constants/controlledReplayBindings.js', () => ({
   CONTROLLED_REPLAY_BINDINGS: catalogue,
   verifyControlledReplayAuthority: authority,
   verifyControlledReplayExclusions: exclusions,
+  verifyProviderFreeSearchReceiptScope: shippedCatalogue.verifyProviderFreeSearchReceiptScope,
 }))
 const { default: originalEnv } = await import('../config/env.js')
 jest.unstable_mockModule('../config/env.js', () => ({ default: { ...originalEnv,
   nodeEnv: 'test', appEnv: 'development', outcomeStudioProviderEnabled: false,
 } }))
 const renderer = await import('../services/runtimeRendererService.js')
+let projectedBuildEnabled = true
 jest.unstable_mockModule('../services/runtimeRendererService.js', () => ({ ...renderer,
-  getRuntimeRenderer: async () => ({ actions: [{ actionKey: 'BUILD_EVIDENCE_PACK', enabled: true }] }),
+  getRuntimeRenderer: async () => ({ actions: [{ actionKey: 'BUILD_EVIDENCE_PACK', enabled: projectedBuildEnabled }] }),
 }))
 const { RuntimeInstance, FrameworkPackage, RuntimePathRegistry, Customer, Tenant, LicenseLevel,
   RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeStateSection, RuntimeStateMigrationReceipt,
-  RuntimeGraphSnapshot, RuntimeGraphElement, AuditLog } = await import('../models/index.js')
+  RuntimeGraphSnapshot, RuntimeGraphElement, RuntimeEvidenceSnapshot, AuditLog } = await import('../models/index.js')
 const { default: Run } = await import('../models/RuntimeAcquisitionRun.js')
 const { default: User } = await import('../models/User.js')
 const { default: Role } = await import('../models/Role.js')
 const { default: auditService } = await import('../services/auditService.js')
-const { stageRuntimeStateNativeInitialization } = await import('../services/runtimeStateNativeInitializationService.js')
+const { stageRuntimeStateNativeInitialization, buildRuntimeStateNativeInitialFrameworkState } = await import('../services/runtimeStateNativeInitializationService.js')
 const { storedControlledReplayBindingDigest, assertControlledReplayProvenancePairs,
   controlledReplayProvenanceForRow } = await import('../services/controlledReplayContract.js')
 const { controlledReplayIsolationCas } = await import('../services/controlledReplayIsolationService.js')
 const { assertAcquisitionTerminalProof } = await import('../services/acquisitionReceiptProof.js')
+const { publicResearchHash } = await import('../services/publicResearchContract.js')
+const { createRuntimeStateLegacySourceRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+const { buildWebsiteDiscoveryEvidenceFromDecodedHtml } = await import('../services/discoveryIntelligenceService.js')
+const { buildEvidenceMembershipBody, membershipHash } = await import('../services/runtimeEvidenceSnapshotContract.js')
 const { readResearchConfiguration, writeResearchConfiguration, readAcquisitionRuns, readAcquisitionRun, cancelRecordedAcquisitionRun } = await import('../controllers/acquisitionRun.controller.js')
 const { validateResearchConfigurationScope, validateResearchConfigurationSave, validateAcquisitionCancellation, validateAcquisitionRunParams, validateAcquisitionRunScope } = await import('../validators/acquisitionRun.validator.js')
 const { default: authJwt } = await import('../middleware/authJwt.js')
 const actualAcquisition = await import('../services/acquisitionRunService.js')
+const OriginalResponse = globalThis.Response
 jest.unstable_mockModule('../services/acquisitionRunService.js', () => ({ ...actualAcquisition,
   handleAcquisitionFailure: async (context, error, pack) => {
     console.info(JSON.stringify({ proof: 'ISOLATED_ORIGINAL_ACQUISITION_FAILURE', error: {
@@ -62,6 +69,12 @@ const childMode = process.env.VMF_CONTROLLED_REPLAY_CHILD_MODE
 const isolated = process.env.VMF_CONTROLLED_REPLAY_ISOLATED === '1' && !childMode ? describe : describe.skip
 const database = 'ss049_provider_free_slice'
 const binaryHash = '919ce2ee9893ffcac72e95610f543beacce721a7c226867568856ca0754d49d8'
+const requestedPort = process.env.VMF_CONTROLLED_REPLAY_PORT
+const fixturePort = requestedPort === undefined ? 0 : Number(requestedPort)
+if (requestedPort !== undefined && (!/^(0|[1-9]\d*)$/.test(requestedPort) || !Number.isSafeInteger(fixturePort)
+  || fixturePort !== 0 && (fixturePort <= 1024 || fixturePort > 65535
+    || [5173, 6379, 6382, 8000, 8003, 9231, 27017, 27018, 27019, 27087, 27088, 27089].includes(fixturePort))))
+  throw new Error('Explicit owned fixture port required')
 const isProofDataDirectory = dataDir => {
   if (!dataDir || !isAbsolute(dataDir)) return false
   const pathFromEvidence = relative(resolve('C:/Dev/StoryLineOS/VMF-Evidence'), resolve(dataDir))
@@ -70,8 +83,8 @@ const isProofDataDirectory = dataDir => {
 }
 describe('provider-free fixture data directory', () => {
   test.each([
-    [resolve(process.cwd(), '..', '..fixture'), false],
-    [resolve(process.cwd(), 'fixture-data'), false],
+    [resolve(fileURLToPath(new URL('../../', import.meta.url)), '..', '..fixture'), false],
+    [resolve(fileURLToPath(new URL('../../', import.meta.url)), 'fixture-data'), false],
     ['C:/Dev/StoryLineOS/VMF-Evidence', false],
     ['C:/Dev/StoryLineOS/VMF-Evidence-other/fixture', false],
     ['D:/unapproved-fixture', false],
@@ -83,7 +96,7 @@ describe('provider-free fixture data directory', () => {
 })
 const models = [RuntimeInstance, FrameworkPackage, RuntimePathRegistry, Customer, Tenant, LicenseLevel,
   Run, RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeStateSection, RuntimeStateMigrationReceipt,
-  RuntimeGraphSnapshot, RuntimeGraphElement, AuditLog, User, Role]
+  RuntimeGraphSnapshot, RuntimeGraphElement, RuntimeEvidenceSnapshot, AuditLog, User, Role]
 const ids = Object.fromEntries(['runtime', 'customer', 'tenant', 'actor', 'package', 'license']
   .map((key, index) => [key, new mongoose.Types.ObjectId(String(index + 1).repeat(24))]))
 const at = '2026-11-11T10:00:00.000Z'
@@ -127,6 +140,7 @@ const appFor = (selectedScopes = scopes(), actorId = String(ids.actor)) => {
 
 isolated('provider-free acquisition through real persistence and ordinary readers', () => {
   let replica, owned = false, connected = false
+  let expectedFixtureFetchCalls = 0, expectedFixtureDnsCalls = 0
   const assertOwned = () => {
     if (!owned || mongoose.connection.host !== '127.0.0.1' || mongoose.connection.name !== database)
       throw new Error('Owned isolated provider-free database required.')
@@ -147,7 +161,7 @@ isolated('provider-free acquisition through real persistence and ordinary reader
     if (!isProofDataDirectory(dataDir))
       throw new Error('Explicit external fixture data directory required.')
     replica = await MongoMemoryReplSet.create({ binary: { systemBinary: binary, version: '7.0.14' },
-      replSet: { count: 1, storageEngine: 'wiredTiger' }, instanceOpts: [{ dbPath: dataDir }] })
+      replSet: { count: 1, storageEngine: 'wiredTiger' }, instanceOpts: [{ dbPath: dataDir, ...(fixturePort ? { port: fixturePort } : {}) }] })
     const uri = replica.getUri(database)
     if (!uri.startsWith('mongodb://127.0.0.1:')) throw new Error('Owned loopback replica required.')
     await mongoose.connect(uri, { autoCreate: false, autoIndex: false, maxPoolSize: 6,
@@ -157,7 +171,7 @@ isolated('provider-free acquisition through real persistence and ordinary reader
       throw new Error('Empty fixed fixture database required.')
     owned = true; assertOwned()
     for (const model of models) await model.createCollection()
-    for (const model of [Run, RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeInstance]) await model.createIndexes()
+    for (const model of [Run, RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeInstance, RuntimeEvidenceSnapshot]) await model.createIndexes()
     expect((await mongoose.connection.db.admin().command({ hello: 1 })).setName).toEqual(expect.any(String))
   }, 120000)
   afterAll(async () => {
@@ -168,6 +182,7 @@ isolated('provider-free acquisition through real persistence and ordinary reader
   })
   beforeEach(async () => {
     assertOwned(); jest.restoreAllMocks()
+    expectedFixtureFetchCalls = 0; expectedFixtureDnsCalls = 0
     const actual = (await mongoose.connection.db.listCollections().toArray()).map(row => row.name).sort()
     expect(actual).toEqual(models.map(model => model.collection.name).sort())
     for (const model of models) await model.collection.deleteMany({})
@@ -195,8 +210,9 @@ isolated('provider-free acquisition through real persistence and ordinary reader
       actorUserId: ids.actor, session, now: new Date(at) })) } finally { await session.endSession() }
   })
   afterEach(() => {
-    expect(globalThis.fetch).not.toHaveBeenCalled()
-    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).not.toHaveBeenCalled()
+    projectedBuildEnabled = true
+    expect(globalThis.fetch).toHaveBeenCalledTimes(expectedFixtureFetchCalls)
+    expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(expectedFixtureDnsCalls)
     delete globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__
     jest.restoreAllMocks()
   })
@@ -241,6 +257,978 @@ isolated('provider-free acquisition through real persistence and ordinary reader
     expect(ready.status).toBe(200); expect(ready.body.data.availability.fixtureStart.eligible).toBe(true)
     return { ...prepared, entry }
   }
+  const tavilyResponses = JSON.parse(readFileSync(new URL('./fixtures/syntheticPublicResearchResponses.json', import.meta.url), 'utf8'))
+  const protectExistingMaterial = async () => {
+    // Authored synthetic protection preconditions, not a native lock/acceptance.
+    // The snapshot's audit reference is deliberately unverified and it is NOT
+    // installed as this active runtime's lockedEvidenceSnapshot pointer.
+    const captured = JSON.parse(readFileSync(new URL('./fixtures/controlledWebsiteCapture.json', import.meta.url), 'utf8'))
+    const product = buildWebsiteDiscoveryEvidenceFromDecodedHtml({ html: captured.html, normalizedUrl: captured.url, finalUrl: captured.url,
+      acquisitionProfile: 'STANDARD', acquiredAt: captured.capturedAt, recordSourceCapture: true,
+      contentTruncated: false, charactersRead: captured.html.length, characterLimit: 320000 })
+    const migration = await RuntimeStateMigrationReceipt.collection.findOne({ runtimeInstanceId: ids.runtime })
+    const mapped = createRuntimeStateLegacySourceRowSet({ scope: { runtimeInstanceId: ids.runtime, runtimeInstanceKey: runtimeKey,
+      customerId: ids.customer, tenantId: ids.tenant }, stateVersion: state, migrationReceiptId: migration.receiptId, migrationTimestamp: at,
+    legacyInput: { rawBsonBytes: 4096, sections: { customer_problem: { input: 'Synthetic protected context',
+      accepted: { evidenceRefs: [product.source.sourceId] }, state: { status: 'DRAFT' } } },
+    evidencePack: { sourceRegistry: [product.sourceRegistryEntry], evidenceObjects: product.evidenceObjects },
+    intelligenceGraph: { graphVersion: 'synthetic-protected-membership', nodes: [], edges: [] } } })
+    const sources = await RuntimeEvidenceSource.create(mapped.rows.evidenceSources.map(row => ({ ...row, current: true })))
+    const evidence = await RuntimeEvidenceObject.create(mapped.rows.evidenceObjects.map(row => ({ ...row, current: true })))
+    const sections = await RuntimeStateSection.create(mapped.rows.sections.map(row => ({ ...row, current: true })))
+    expect(sources.length).toBeGreaterThan(0); expect(evidence.length).toBeGreaterThan(0); expect(sections.length).toBeGreaterThan(0)
+    // Authored package-binding labels only: no installation, activation or deployment occurred.
+    await RuntimeInstance.collection.updateOne({ _id: ids.runtime, customerId: ids.customer, tenantId: ids.tenant }, { $set: {
+      dependencyLockId: 'ss049-authored-protection-dependency-not-installed',
+      activationId: 'ss049-authored-protection-activation-not-performed',
+      deploymentId: 'ss049-authored-protection-deployment-not-performed',
+    } })
+    const runtime = await currentRoot(), lockTruthRecord = { snapshotId: 'ss049-authored-protected-lock-fixture', snapshotHash: 'a'.repeat(64),
+      snapshotAt: at, contractVersion: 'runtime-truth-snapshot-v1', actionKey: 'LOCK_RECORD' }
+    const body = buildEvidenceMembershipBody({ runtime, lockTruthRecord, sources: sources.map(row => row.toObject()),
+      evidence: evidence.map(row => row.toObject()), sections: sections.map(row => row.toObject()) })
+    const snapshot = new RuntimeEvidenceSnapshot({ ...body.scope, snapshotId: 'evidence_snapshot_' + randomUUID(), contractVersion: body.contractVersion,
+      basisStateVersion: state, lockSnapshotId: lockTruthRecord.snapshotId, lockSnapshotHash: lockTruthRecord.snapshotHash,
+      membershipHash: membershipHash(body), body, createdBy: ids.actor, createdAt: new Date(at),
+      lockAuditId: new mongoose.Types.ObjectId(), lockAuditSignatureVersion: 3 })
+    expect(snapshot.validateSync()).toBeUndefined(); await snapshot.save()
+    expect(await RuntimeEvidenceSnapshot.countDocuments()).toBe(1)
+  }
+  const prepareTavilyReceipt = async () => {
+    const prepared = await prepareNativeLocalRegistration(), settings = configurationBody(prepared.record)
+    await protectExistingMaterial()
+    settings.settings.sources = ['SEARCH']; settings.settings.startingUrls = ['https://controlled-capture.example/']
+    const saved = await putConfiguration(settings); expect(saved.status).toBe(200)
+    const configuration = saved.body.data.configuration
+    expect(saved.body.data.availability.canStart).toBe(false)
+    expect(saved.body.data.availability.fixtureStart.eligible).toBe(false)
+    return { configuration, payload: { requestKey: randomUUID(), expectedUpdatedAt: at,
+      fixture: { selector: { configurationVersion: configuration.configurationVersion, configurationHash: configuration.configurationHash,
+        basisStateVersion: state }, settings: configuration.settings, provider: 'TAVILY_SEARCH', approvedHostname: 'controlled-capture.example',
+      approvedTerms: ['workflow monitoring'], transportOutcome: 'COMPLETE', httpStatus: 200,
+      responseId: 'synthetic-saved-tavily-response', capturedAt: '2026-11-13T09:00:00.000Z', simulatedElapsedMs: 20,
+      responseText: JSON.stringify(tavilyResponses.providerShapes.tavily) } } }
+  }
+  const recordTavily = (payload, extra = {}) => actualAcquisition.recordProviderFreeTavilyReceipt({ scopes: scopes(),
+    actorUserId: String(ids.actor), runtimeInstanceId: runtimeKey, payload, ...extra })
+  const exactTavily = runId => request(appFor()).get(`/${runtimeKey}/acquisition-runs/${runId}`).query(configQuery)
+  const protectedReceiptMaterial = async () => {
+    assertOwned()
+    const versioned = new Set([RuntimeInstance, User, Role, Customer, Tenant])
+    const material = Object.fromEntries(await Promise.all(models.filter(model => ![Run, AuditLog].includes(model)).map(async model => {
+      const rows = await model.collection.find({}).sort({ _id: 1 }).toArray()
+      return [model.collection.name, rows.map(row => {
+        const copy = { ...row }; if (versioned.has(model)) delete copy.__v
+        return [String(copy._id), digest(copy)]
+      })]
+    })))
+    const snapshot = await RuntimeEvidenceSnapshot.collection.findOne({ runtimeInstanceId: ids.runtime })
+    expect(snapshot).not.toBeNull()
+    const [sources, evidence, sections] = await Promise.all([RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeStateSection]
+      .map(model => model.collection.find({ runtimeInstanceId: ids.runtime, current: true }).toArray()))
+    expect(sources.length).toBeGreaterThan(0); expect(evidence.length).toBeGreaterThan(0); expect(sections.length).toBeGreaterThan(0)
+    material.authoredFrozenMembershipHash = membershipHash(buildEvidenceMembershipBody({ runtime: await currentRoot(),
+      lockTruthRecord: snapshot.body.lockTruthRecord, sources, evidence, sections }))
+    expect(material.authoredFrozenMembershipHash).toBe(snapshot.membershipHash)
+    return material
+  }
+  const prepareTrilogyStart = async () => {
+    const { configuration } = await prepareTavilyReceipt(), next = configurationBody(configuration)
+    next.settings.sources = ['SEARCH']; next.settings.startingUrls = ['https://www.trilogywebsolutions.co.uk/clients/']
+    const saved = await putConfiguration(next); expect(saved.status).toBe(200)
+    const descriptor = saved.body.data.availability.fixtureStart
+    expect(saved.body.data.availability.canStart).toBe(false)
+    expect(descriptor).toMatchObject({ contractVersion: 'provider-free-search-start.v1', eligible: true,
+      classification: 'LOCAL_SYNTHETIC_RECEIPT_ONLY', fixture: { fixtureId: 'trilogy-clients-search.v1', fixtureVersion: 1,
+        targetUrl: next.settings.startingUrls[0], provider: 'TAVILY_SEARCH' } })
+    const { fixtureId, fixtureVersion, fixtureFileSha256 } = descriptor.fixture
+    return { descriptor, configuration: saved.body.data.configuration, payload: { requestKey: randomUUID(), expectedUpdatedAt: at,
+      researchConfiguration: descriptor.selector, providerFreeSearch: { fixtureId, fixtureVersion, fixtureFileSha256 } } }
+  }
+  describe('PUBLIC research SEARCH and original WEBSITE', () => {
+    const retainedResponseTest = process.env.VMF_TAVILY_RETAINED_RESPONSE_FILE ? test : test.skip
+    const preparePublicStart = async () => {
+      const prepared = await prepareNativeLocalRegistration(), next = configurationBody(prepared.record)
+      const ownedScope = { runtimeInstanceId: ids.runtime, customerId: ids.customer, tenantId: ids.tenant }
+      const root = await currentRoot(), pack = root.framework_state?.evidence_pack
+      const sections = root.framework_state?.sections, graph = root.framework_state?.intelligence_graph
+      if (sections !== undefined) {
+        expect(sections).not.toBeNull(); expect(typeof sections).toBe('object'); expect(Array.isArray(sections)).toBe(false)
+        expect(Object.keys(sections)).toEqual([])
+      }
+      if (graph !== undefined) {
+        expect(graph).not.toBeNull(); expect(typeof graph).toBe('object'); expect(Array.isArray(graph)).toBe(false)
+        expect(Object.keys(graph).every(key => ['graphVersion', 'nodes', 'edges'].includes(key))).toBe(true)
+        if (graph.graphVersion !== undefined) expect(graph.graphVersion).toBe(root.stateVersion)
+        for (const key of ['nodes', 'edges']) if (graph[key] !== undefined) expect(graph[key]).toEqual([])
+      }
+      if (pack !== undefined) {
+        expect(pack).not.toBeNull(); expect(typeof pack).toBe('object'); expect(Array.isArray(pack)).toBe(false)
+        expect(Object.keys(pack).every(key => ['sourceRegistry', 'evidenceObjects'].includes(key))).toBe(true)
+        for (const key of ['sourceRegistry', 'evidenceObjects']) if (pack[key] !== undefined) expect(pack[key]).toEqual([])
+      }
+      for (const model of [RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeEvidenceSnapshot,
+        RuntimeStateSection, RuntimeGraphSnapshot, RuntimeGraphElement])
+        expect(await model.countDocuments(ownedScope)).toBe(0)
+      const receiptBefore = await RuntimeStateMigrationReceipt.collection.find({ ...ownedScope }).sort({ _id: 1 }).toArray()
+      const initial = buildRuntimeStateNativeInitialFrameworkState({ frameworkState: {}, stateVersion: root.stateVersion })
+      const seeded = await RuntimeInstance.collection.updateOne({ _id: ids.runtime, customerId: ids.customer, tenantId: ids.tenant,
+        stateVersion: root.stateVersion, updatedAt: root.updatedAt },
+      { $set: { 'framework_state.sections': initial.sections, 'framework_state.evidence_pack': initial.evidence_pack,
+        'framework_state.intelligence_graph': initial.intelligence_graph } })
+      expect(seeded.matchedCount).toBe(1)
+      const seededRoot = await currentRoot()
+      expect(seededRoot).toEqual({ ...root, framework_state: { ...root.framework_state, ...initial } })
+      expect(await RuntimeStateMigrationReceipt.collection.find({ ...ownedScope }).sort({ _id: 1 }).toArray()).toEqual(receiptBefore)
+      next.settings.sources = ['SEARCH', 'WEBSITE']; next.settings.startingUrls = [fixture.sourceUrl]
+      const saved = await putConfiguration(next)
+      expect([saved.status, saved.body.error]).toEqual([200, undefined])
+      const descriptor = saved.body.data.availability.researchStart
+      expect(descriptor.reason).toBeUndefined()
+      expect(descriptor).toMatchObject({ contractVersion: 'public-research-start.v1', eligible: true,
+        mode: 'OFFLINE', liveExecutionEnabled: false, classification: 'CONTROLLED_PROVIDER_FREE_RESEARCH' })
+      const { fixtureId, fixtureVersion, fixtureFileSha256, controlledBindingId } = descriptor.fixture
+      return { configuration: saved.body.data.configuration, payload: { requestKey: randomUUID(), expectedUpdatedAt: at,
+        acquisitionProfile: 'STANDARD', researchConfiguration: descriptor.selector,
+        controlledReplay: { bindingId: controlledBindingId },
+        publicResearch: { mode: 'OFFLINE', fixture: { fixtureId, fixtureVersion, fixtureFileSha256 } } } }
+    }
+    const rawPublicRun = runId => Run.collection.findOne({ ...(runId ? { runId } : {}), contractVersion: 'public-research-run.v1' })
+    const noCanonicalResearch = async () => {
+      const root = await currentRoot()
+      expect(root.stateVersion).toBe(state)
+      expect(root.framework_state.evidence_pack?.evidenceObjects || []).toEqual([])
+      expect(await RuntimeEvidenceSource.countDocuments()).toBe(0)
+      expect(await RuntimeEvidenceObject.countDocuments()).toBe(0)
+    }
+    const prepareRetainedResponseStart = async () => {
+      const file = process.env.VMF_TAVILY_RETAINED_RESPONSE_FILE
+      expect(typeof file).toBe('string'); expect(isAbsolute(file)).toBe(true); expect(isProofDataDirectory(file)).toBe(true)
+      const bytes = readFileSync(file)
+      expect(bytes.length).toBe(6175)
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe('1d2e9986210b9e679a30f84cc0f951bddf95422f3eee1e5e4ab43e9ad03dd11b')
+      const retained = bytes.toString('utf8'), retainedBody = JSON.parse(retained)
+      expect(retainedBody.query === 'infrastructure observability').toBe(true)
+      expect(process.env.PUBLIC_RESEARCH_OPERATING_POLICY).toBeUndefined()
+      expect(process.env.TAVILY_API_KEY).toBeUndefined()
+      const { configuration } = await preparePublicStart(), next = configurationBody(configuration)
+      next.settings.sources = ['SEARCH', 'WEBSITE']; next.settings.startingUrls = ['https://parlon.io/']
+      next.settings.instructions = 'Isolated retained-response proof; homepage and authority are synthetic.'
+      const saved = await putConfiguration(next)
+      expect([saved.status, saved.body.error]).toEqual([200, undefined])
+      const record = saved.body.data.configuration, requestKey = randomUUID()
+      expect(requestKey).not.toBe('a9f9330a-39aa-44b0-814f-544bd8cd74cf')
+      const policy = { contractVersion: 'public-research-operating-policy.v1', environment: 'DEVELOPMENT_TEST',
+        releaseId: requestKey, expiresAt: new Date(Date.now() + 3600000).toISOString(), binding: {
+          customerId: String(ids.customer), tenantId: String(ids.tenant), runtimeInstanceId: String(ids.runtime),
+          runtimeInstanceKey: runtimeKey, actorUserId: String(ids.actor), configurationVersion: record.configurationVersion,
+          configurationHash: record.configurationHash, basisStateVersion: state, basisUpdatedAt: at },
+        approvalRef: 'ISOLATED_FAKE_HTTP_NOT_LIVE_APPROVAL', licensingRef: 'RETAINED_PUBLIC_RESPONSE_OFFLINE_ONLY',
+        retentionRef: 'EXTERNAL_FIXTURE_EVIDENCE', disclosureRef: 'NO_EXTERNAL_DISCLOSURE', processingRegion: 'LOCAL_ONLY',
+        credentialOwner: 'SYNTHETIC_KEY_ONLY', spendOwner: 'NO_EXTERNAL_SPEND', references: [{
+          url: 'https://docs.tavily.com/documentation/api-reference/endpoint/search', version: 'snapshot-2026-11-13',
+          sha256: 'sha256:f21c26009cd512a70e18ee6d4bedd9e7699e429fe850fc957a93705ccd24c888' }],
+        approvedStartingUrls: ['https://parlon.io/'], approvedDiscoveryUrls: [], approvedTerms: ['infrastructure observability'],
+        partialSave: 'NONE', limits: { maxSearchRequests: 1, maxRegistryRequests: 0, maxPages: 1,
+          maxPageBytes: 320000, maxJsonBytes: 16384, maxTotalBytes: 1048576, maxElapsedMs: 120000, maxRequestMs: 6000,
+          maxCostMicros: 0, searchRequestCostMicros: 0, registryRequestCostMicros: 0,
+          concurrency: 1, retries: 0, redirects: 0, modelTokens: 0 } }
+      const synthetic = JSON.parse(readFileSync(new URL('./fixtures/controlledWebsiteCapture.json', import.meta.url), 'utf8'))
+      const counters = { search: 0, website: 0 }
+      const priorFetch = globalThis.fetch, priorDns = globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__
+      const priorPolicy = process.env.PUBLIC_RESEARCH_OPERATING_POLICY, priorKey = process.env.TAVILY_API_KEY
+      process.env.PUBLIC_RESEARCH_OPERATING_POLICY = JSON.stringify(policy)
+      process.env.TAVILY_API_KEY = 'SYNTHETIC_RETAINED_RESPONSE_ONLY_NOT_A_REAL_CREDENTIAL'
+      expectedFixtureFetchCalls = 2; expectedFixtureDnsCalls = 1
+      globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = jest.fn(async hostname => {
+        expect(hostname).toBe('parlon.io'); return [{ address: '93.184.216.34', family: 4 }]
+      })
+      // A callable fake is the only transport dependency. The external fence
+      // still denies actual sockets/DNS/TLS even if this exact dispatch changes.
+      globalThis.fetch = jest.fn(async (url, options) => {
+        if (url === 'https://api.tavily.com/search') {
+          counters.search++
+          expect(options.method).toBe('POST'); expect(options.redirect).toBe('error')
+          expect(options.headers.Authorization === 'Bearer SYNTHETIC_RETAINED_RESPONSE_ONLY_NOT_A_REAL_CREDENTIAL').toBe(true)
+          const body = JSON.parse(options.body)
+          expect(body.query).toBe('site:parlon.io infrastructure observability')
+          expect(body.include_domains).toEqual(['parlon.io']); expect(body.include_domains_mode).toBe('restrict')
+          expect(body.max_results).toBe(4); expect(body.search_depth).toBe('basic')
+          return new OriginalResponse(bytes, { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        if (url === 'https://parlon.io/') {
+          counters.website++
+          expect(options.method ?? 'GET').toBe('GET')
+          expect(options.redirect).toBe('manual')
+          expect(options.headers.Authorization).toBeUndefined()
+          return new OriginalResponse(synthetic.html, { status: 200, headers: {
+            'content-type': 'text/html', 'content-length': String(Buffer.byteLength(synthetic.html)) } })
+        }
+        throw new Error('UNEXPECTED_ISOLATED_RETAINED_RESPONSE_DISPATCH')
+      })
+      return { retained, retainedBody, counters, payload: { requestKey, expectedUpdatedAt: at, acquisitionProfile: 'STANDARD',
+        researchConfiguration: { configurationVersion: record.configurationVersion,
+          configurationHash: record.configurationHash, basisStateVersion: state },
+        publicResearch: { mode: 'LIVE', releaseId: requestKey } }, restore: () => {
+        // Verify exact fake dispatch counts before restoring; never clear calls.
+        try {
+          expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+          expect(globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__).toHaveBeenCalledTimes(1)
+          expect(counters).toEqual({ search: 1, website: 1 })
+        } finally {
+          globalThis.fetch = priorFetch; globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = priorDns
+          expectedFixtureFetchCalls = 0; expectedFixtureDnsCalls = 0
+          if (priorPolicy === undefined) delete process.env.PUBLIC_RESEARCH_OPERATING_POLICY
+          else process.env.PUBLIC_RESEARCH_OPERATING_POLICY = priorPolicy
+          if (priorKey === undefined) delete process.env.TAVILY_API_KEY
+          else process.env.TAVILY_API_KEY = priorKey
+        }
+      } }
+    }
+    const assertRetainedOperation = async row => {
+      const search = row.publicResearch.operations[0]
+      expect(search.category).toBe('SEARCH'); expect(search.phase).toBe('RECORDED'); expect(search.outcome).toBe('SUCCEEDED')
+      expect(search.receipt.httpStatus).toBe(200); expect(search.receipt.bytesRead).toBe(6175)
+      expect(search.receipt.responseTextHash).toBe('sha256:1d2e9986210b9e679a30f84cc0f951bddf95422f3eee1e5e4ab43e9ad03dd11b')
+      expect(search.mapping.queryBinding).toEqual({ contractVersion: 'tavily-query-binding.v2',
+        submittedQuery: 'site:parlon.io infrastructure observability', providerQuery: 'infrastructure observability',
+        normalization: 'LEADING_APPROVED_SITE_OPERATOR_REMOVED' })
+      expect(search.requestDescriptor.body.query).toBe('site:parlon.io infrastructure observability')
+      expect(search.requestHash).toBe(publicResearchHash(search.requestDescriptor))
+      expect(row.publicResearch.operations.map(operation => operation.category)).toEqual(['SEARCH', 'WEBSITE'])
+      expect(row.publicResearch.ledgerSequence).toBe(4)
+      for (const audit of await AuditLog.find({ 'diff.runId': row.runId })) expect(audit.verifySignature()).toBe(true)
+      const exact = await exactTavily(row.runId)
+      expect(exact.status).toBe(200); expect(exact.body.data.publicResearch.receiptHash).toBe(row.publicResearch.ledgerHash)
+      return exact.body.data
+    }
+    retainedResponseTest('retained Tavily response persists exact bytes through synthetic LIVE-shaped transport, pending originals, read-back and idempotent replay', async () => {
+      const retained = await prepareRetainedResponseStart()
+      try {
+        const available = await readConfiguration()
+        expect(available.status).toBe(200); expect(available.body.data.availability.researchStart).toMatchObject({ eligible: true, mode: 'LIVE' })
+        const started = await acquire(appFor(), retained.payload)
+        expect([started.status, started.body.error]).toEqual([200, undefined])
+        const row = await rawPublicRun(started.body.data.acquisitionRun.runId)
+        expect(row.status).toBe('SUCCEEDED'); expect(row.canonicalSaved).toBe(true)
+        expect(row.publicResearch.operations[0].receipt.responseText === retained.retained).toBe(true)
+        await assertRetainedOperation(row)
+        const sources = await request(appFor()).get(`/${runtimeKey}/state/sources`)
+        const pending = await request(appFor()).get(`/${runtimeKey}/state/evidence`).query({ reviewStatus: 'PENDING', pageSize: 50 })
+        expect(sources.status).toBe(200); expect(pending.status).toBe(200)
+        expect(sources.body.data.sourceRegistry).toHaveLength(1)
+        const source = sources.body.data.sourceRegistry[0]
+        expect(source.sourceRef).toBe('https://parlon.io/')
+        expect(source.sourceCapture.captureReceipt).toMatchObject({ runId: row.runId, attemptId: row.executionAttemptId,
+          inputIndex: 0, operation: 'WEBSITE_DECODED_TEXT_CAPTURE' })
+        expect(pending.body.data.evidenceObjects.length).toBeGreaterThan(0)
+        const serialized = JSON.stringify(pending.body.data.evidenceObjects)
+        expect(retained.retainedBody.results.some(item => serialized.includes(item.content))).toBe(false)
+        expect(pending.body.data.evidenceObjects.every(object => object.reviewStatus === 'PENDING' && object.sourceId === source.sourceId)).toBe(true)
+        const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), original = digest(row)
+        const replay = await acquire(appFor(), retained.payload)
+        expect(replay.status).toBe(200); expect(replay.body.data.acquisitionRun).toMatchObject({ runId: row.runId,
+          executionAttemptId: row.executionAttemptId, replay: true, canonicalSaved: true })
+        expect(digest(await rawPublicRun(row.runId))).toBe(original)
+        expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits)
+        expect(await snapshotMaterial()).toEqual(before)
+      } finally { retained.restore() }
+    })
+    retainedResponseTest('retained Tavily response remains signed and replayable when canonical terminal audit failure rolls back synthetic originals', async () => {
+      const retained = await prepareRetainedResponseStart(), rootBefore = { ...await currentRoot() }
+      delete rootBefore.__v
+      const before = await Promise.all([RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeStateSection, RuntimeStateMigrationReceipt,
+        RuntimeGraphSnapshot, RuntimeGraphElement, RuntimeEvidenceSnapshot].map(async model => [model.collection.name,
+        digest({ rows: await model.collection.find({}).sort({ _id: 1 }).toArray() })]))
+      const originalLog = auditService.log.bind(auditService)
+      let attemptedCanonical = false
+      const log = jest.spyOn(auditService, 'log').mockImplementation(async (input, options) => {
+        if (input.diff?.phase === 'SUCCEEDED' && input.diff.publicResearchPlanHash) {
+          expect(await RuntimeEvidenceSource.countDocuments({ current: true }).session(options.session)).toBeGreaterThan(0)
+          expect(await RuntimeEvidenceObject.countDocuments({ current: true }).session(options.session)).toBeGreaterThan(0)
+          attemptedCanonical = true
+          throw Object.assign(new Error('Synthetic retained-response terminal audit failure'), { status: 503, code: 'SERVICE_UNAVAILABLE',
+            details: { reason: 'SYNTHETIC_RETAINED_TERMINAL_AUDIT_FAILURE' } })
+        }
+        return originalLog(input, options)
+      })
+      try {
+        const started = await acquire(appFor(), retained.payload)
+        log.mockRestore()
+        expect(attemptedCanonical).toBe(true); expect(started.status).toBe(503)
+        expect(started.body.error.details.reason).toBe('SYNTHETIC_RETAINED_TERMINAL_AUDIT_FAILURE')
+        const row = await rawPublicRun()
+        expect(row.status).toBe('PARTIALLY_SUCCEEDED'); expect(row.canonicalSaved).toBe(false)
+        expect(row.publicResearch.operations[0].receipt.responseText === retained.retained).toBe(true)
+        await assertRetainedOperation(row)
+        const rootAfter = { ...await currentRoot() }; delete rootAfter.__v
+        expect(rootAfter).toEqual(rootBefore)
+        for (const [collection, hash] of before)
+          expect(digest({ rows: await mongoose.connection.db.collection(collection).find({}).sort({ _id: 1 }).toArray() })).toBe(hash)
+        expect(await AuditLog.countDocuments({ action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED })).toBe(0)
+        const audits = await AuditLog.countDocuments(), saved = digest(row)
+        const replay = await acquire(appFor(), retained.payload)
+        expect(replay.status).toBe(200); expect(replay.body.data.acquisitionRun).toMatchObject({ runId: row.runId,
+          status: 'PARTIALLY_SUCCEEDED', canonicalSaved: false, replay: true })
+        expect(digest(await rawPublicRun(row.runId))).toBe(saved); expect(await Run.countDocuments()).toBe(1)
+        expect(await AuditLog.countDocuments()).toBe(audits)
+      } finally { log.mockRestore(); retained.restore() }
+    })
+    test.each(['EXACT', 'LEADING_APPROVED_SITE_OPERATOR_REMOVED'])('mounted Start persists two signed operations, pending originals and safe exact/history read-back; replay performs no IO with %s query', async normalization => {
+      const { payload } = await preparePublicStart()
+      let submittedQuery, providerQuery, suppliedResponse, snippet
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation((raw, options) => {
+        const body = JSON.parse(raw)
+        submittedQuery = body.query
+        providerQuery = normalization === 'EXACT' ? submittedQuery
+          : submittedQuery.slice(('site:' + new URL(fixture.sourceUrl).hostname + ' ').length)
+        body.query = providerQuery; snippet = body.results[0].content; suppliedResponse = JSON.stringify(body)
+        return new OriginalResponse(suppliedResponse, options)
+      })
+      const started = await acquire(appFor(), payload)
+      expect([started.status, started.body.error]).toEqual([200, undefined])
+      const dto = started.body.data.acquisitionRun, row = await rawPublicRun(dto.runId), root = await currentRoot()
+      expect(dto).toMatchObject({ contractVersion: 'public-research-run.v1', plannerVersion: 'public-research-planner.v1',
+        status: 'SUCCEEDED', canonicalSaved: true, outputStateVersion: root.stateVersion,
+        publicResearch: { mode: 'OFFLINE', liveExecutionEnabled: false, operationCount: 2, completedOperationCount: 2 } })
+      expect(dto).not.toHaveProperty('controlledReplayProvenance')
+      expect(row.publicResearch.ledgerSequence).toBe(4)
+      expect(row.publicResearch.operations.map(operation => [operation.ordinal, operation.category, operation.phase, operation.outcome]))
+        .toEqual([[0, 'SEARCH', 'RECORDED', 'SUCCEEDED'], [1, 'WEBSITE', 'RECORDED', 'SUCCEEDED']])
+      expect(row.publicResearch.plan.limits).toMatchObject({ maxRegistryRequests: 0, retries: 0, concurrency: 1, redirects: 0, modelTokens: 0 })
+      expect(dto.publicResearch.categories.find(category => category.key === 'REGISTRY')).toMatchObject({ status: 'NOT_SELECTED', completedCount: 0 })
+      expect(row.publicResearch.operations[0].receipt.httpStatus).toBe(200)
+      const search = row.publicResearch.operations[0]
+      expect(submittedQuery).toBe('site:controlled-context.example case study')
+      expect(providerQuery).toBe(normalization === 'EXACT' ? submittedQuery : 'case study')
+      expect(search.mapping.queryBinding).toEqual({ contractVersion: 'tavily-query-binding.v2', submittedQuery, providerQuery, normalization })
+      expect(search.requestDescriptor).toEqual({ method: 'POST', url: 'https://api.tavily.com/search', body: {
+        query: submittedQuery, search_depth: 'basic', topic: 'general', max_results: 4,
+        include_domains: ['controlled-context.example'], include_domains_mode: 'restrict', auto_parameters: false,
+        include_answer: false, include_raw_content: false, include_images: false,
+        include_image_descriptions: false, include_favicon: false, include_usage: true } })
+      expect(search.requestHash).toBe(publicResearchHash(search.requestDescriptor))
+      expect(search.receipt.responseText).toBe(suppliedResponse)
+      expect(search.receipt.responseTextHash).toBe('sha256:' + createHash('sha256').update(suppliedResponse).digest('hex'))
+      expect(row.publicResearch.operations[1].receipt.responseTextHash).toBe('sha256:' + fixture.htmlSha256)
+      const ledger = await AuditLog.find({ 'diff.runId': row.runId, 'diff.publicResearchLedgerHash': { $exists: true } }).sort({ 'diff.publicResearchLedgerSequence': 1 })
+      expect(ledger.map(audit => audit.diff.publicResearchLedgerSequence)).toEqual([1, 2, 3, 4])
+      for (const audit of await AuditLog.find({ 'diff.runId': row.runId })) expect(audit.verifySignature()).toBe(true)
+      const exact = await exactTavily(row.runId)
+      const history = await request(appFor()).get(`/${runtimeKey}/acquisition-runs`).query(configQuery)
+      expect(exact.status).toBe(200); expect(history.status).toBe(200)
+      expect(exact.body.data.publicResearch.receiptHash).toBe(row.publicResearch.ledgerHash)
+      expect(history.body.data.items[0].publicResearch).toEqual(exact.body.data.publicResearch)
+      for (const response of [dto, exact.body.data, history.body.data.items[0]]) {
+        expect(response).not.toHaveProperty('controlledReplayProvenance')
+        expect(JSON.stringify(response)).not.toContain(row.publicResearch.operations[0].receipt.responseText)
+        expect(JSON.stringify(response)).not.toContain(row.publicResearch.operations[1].receipt.responseText)
+      }
+      const sources = await request(appFor()).get(`/${runtimeKey}/state/sources`)
+      const pending = await request(appFor()).get(`/${runtimeKey}/state/evidence`).query({ reviewStatus: 'PENDING', pageSize: 50 })
+      expect(sources.status).toBe(200); expect(pending.status).toBe(200)
+      expect(sources.body.data.sourceRegistry).toHaveLength(1)
+      const source = sources.body.data.sourceRegistry[0], objects = root.framework_state.evidence_pack.evidenceObjects
+      expect(JSON.stringify(objects)).not.toContain(snippet)
+      expect(source.sourceRef).toBe(fixture.sourceUrl)
+      expect(source.sourceCapture.captureReceipt).toMatchObject({ runId: row.runId, attemptId: row.executionAttemptId,
+        operation: 'CONTROLLED_HTML_REPLAY_CAPTURE', inputIndex: 0 })
+      expect(objects.length).toBeGreaterThan(0)
+      expect(pending.body.data.evidenceObjects.map(object => object.evidenceObjectId).sort())
+        .toEqual(objects.map(object => object.evidenceObjectId).sort())
+      for (const object of pending.body.data.evidenceObjects) {
+        expect(object.reviewStatus).toBe('PENDING'); expect(object.sourceId).toBe(source.sourceId)
+        expect(object.evidenceSupport).toEqual(objects.find(value => value.evidenceObjectId === object.evidenceObjectId).evidenceSupport || null)
+      }
+      for (const reviewStatus of ['ACCEPTED', 'REJECTED']) {
+        const page = await request(appFor()).get(`/${runtimeKey}/state/evidence`).query({ reviewStatus })
+        expect(page.status).toBe(200); expect(page.body.data.total).toBe(0)
+      }
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), rows = digest(row)
+      const replay = await acquire(appFor(), payload)
+      expect(replay.status).toBe(200)
+      expect(replay.body.data.acquisitionRun).toMatchObject({ runId: row.runId, executionAttemptId: row.executionAttemptId, replay: true })
+      expect(responses).toHaveBeenCalledTimes(1); expect(await Run.countDocuments()).toBe(1)
+      expect(digest(await rawPublicRun(row.runId))).toBe(rows)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test.each(['extra wrapper', 'raw response', 'mixed mode', 'missing fixture', 'partial predecessor'])('rejects %s before Run admission or IO', async kind => {
+      const { payload } = await preparePublicStart(), responses = jest.spyOn(globalThis, 'Response')
+      if (kind === 'extra wrapper') payload.publicResearch.extra = true
+      if (kind === 'raw response') payload.responseText = 'UNTRUSTED_CLIENT_BODY'
+      if (kind === 'mixed mode') payload.providerFreeSearch = { fixtureId: 'trilogy-clients-search.v1', fixtureVersion: 1, fixtureFileSha256: 'a'.repeat(64) }
+      if (kind === 'missing fixture') delete payload.publicResearch.fixture
+      if (kind === 'partial predecessor') payload.predecessorRunId = randomUUID()
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+      const response = await acquire(appFor(), payload)
+      expect(response.status).toBe(422); expect(responses).not.toHaveBeenCalled()
+      expect(await Run.countDocuments()).toBe(0); expect(await snapshotMaterial()).toEqual(before)
+      expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test.each(['rate limit', 'malformed JSON', 'IO refusal'])('preserves %s and stops before original capture; replay does not dispatch', async kind => {
+      const { payload } = await preparePublicStart()
+      const raw = kind === 'rate limit' ? '{"error":"SYNTHETIC_PUBLIC_RATE_LIMIT"}' : '{"incomplete":'
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation(() => {
+        if (kind === 'IO refusal') throw new Error('SYNTHETIC_PRIVATE_TRANSPORT_ERROR')
+        return new OriginalResponse(raw, { status: kind === 'rate limit' ? 429 : 200 })
+      })
+      const started = await acquire(appFor(), payload)
+      expect([started.status, started.body.error]).toEqual([200, undefined])
+      const row = await rawPublicRun(started.body.data.acquisitionRun.runId)
+      expect(row).toMatchObject({ status: 'FAILED', canonicalSaved: false })
+      expect(row.publicResearch.operations).toHaveLength(1)
+      expect(row.publicResearch.operations[0]).toMatchObject({ category: 'SEARCH', phase: 'RECORDED',
+        outcome: kind === 'IO refusal' ? 'UNKNOWN' : 'FAILED' })
+      if (kind === 'IO refusal') expect(row.publicResearch.operations[0].receipt).toMatchObject({ httpStatus: null,
+        responseText: '', bytesRead: 0, transportOutcome: 'FAILED', bodyComplete: false })
+      else expect(row.publicResearch.operations[0].receipt).toMatchObject({ responseText: raw, httpStatus: kind === 'rate limit' ? 429 : 200 })
+      expect(JSON.stringify(started.body)).not.toContain('SYNTHETIC_PRIVATE_TRANSPORT_ERROR')
+      expect(JSON.stringify(started.body)).not.toContain(raw)
+      await noCanonicalResearch()
+      const audits = await AuditLog.countDocuments(), before = await snapshotMaterial()
+      const replay = await acquire(appFor(), payload)
+      expect(replay.status).toBe(200)
+      expect(replay.body.data.acquisitionRun).toMatchObject({ runId: row.runId, status: 'FAILED', replay: true })
+      expect(responses).toHaveBeenCalledTimes(1); expect(await Run.countDocuments()).toBe(1)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test('original failed request replays after settings replacement and lock; a new key cannot dispatch', async () => {
+      const { payload, configuration } = await preparePublicStart()
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation(() => new OriginalResponse('', { status: 429 }))
+      const first = await acquire(appFor(), payload); expect(first.status).toBe(200)
+      const replacement = configurationBody(configuration)
+      replacement.settings.sources = ['SEARCH', 'WEBSITE']; replacement.settings.startingUrls = [fixture.sourceUrl]
+      replacement.settings.instructions = 'New synthetic saved configuration'
+      expect((await putConfiguration(replacement)).status).toBe(200)
+      await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED', lockedAt: new Date() } })
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+      const replay = await acquire(appFor(), payload)
+      expect(replay.status).toBe(200)
+      expect(replay.body.data.acquisitionRun).toMatchObject({ runId: first.body.data.acquisitionRun.runId, replay: true })
+      const refused = await acquire(appFor(), { ...payload, requestKey: randomUUID() })
+      expect(refused.status).toBe(409)
+      expect(responses).toHaveBeenCalledTimes(1); expect(await Run.countDocuments()).toBe(1)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test('an explicitly paired retry of the exact failed unsaved basis creates one new attempt', async () => {
+      const { payload } = await preparePublicStart()
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementationOnce(() => new OriginalResponse('', { status: 429 }))
+        .mockImplementation((...args) => new OriginalResponse(...args))
+      const first = await acquire(appFor(), payload); expect(first.status).toBe(200)
+      const previous = first.body.data.acquisitionRun
+      expect(previous).toMatchObject({ status: 'FAILED', canonicalSaved: false })
+      const retried = await acquire(appFor(), { ...payload, requestKey: randomUUID(), predecessorRunId: previous.runId,
+        predecessorExecutionAttemptId: previous.executionAttemptId })
+      expect([retried.status, retried.body.error]).toEqual([200, undefined])
+      expect(retried.body.data.acquisitionRun).toMatchObject({ status: 'SUCCEEDED', canonicalSaved: true,
+        predecessorRunId: previous.runId, predecessorExecutionAttemptId: previous.executionAttemptId })
+      expect(retried.body.data.acquisitionRun.executionAttemptId).not.toBe(previous.executionAttemptId)
+      expect(await Run.countDocuments()).toBe(2); expect(responses).toHaveBeenCalledTimes(2)
+    })
+    test('a replacement configuration cannot be used to retry an older failed configuration', async () => {
+      const { payload, configuration } = await preparePublicStart()
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation(() => new OriginalResponse('', { status: 429 }))
+      const first = await acquire(appFor(), payload); expect(first.status).toBe(200)
+      const prior = first.body.data.acquisitionRun, replacement = configurationBody(configuration)
+      replacement.settings.sources = ['SEARCH', 'WEBSITE']; replacement.settings.startingUrls = [fixture.sourceUrl]
+      const saved = await putConfiguration(replacement); expect(saved.status).toBe(200)
+      const selector = saved.body.data.availability.researchStart.selector
+      expect(selector.configurationVersion).not.toBe(payload.researchConfiguration.configurationVersion)
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+      const retry = await acquire(appFor(), { ...payload, requestKey: randomUUID(), researchConfiguration: selector,
+        predecessorRunId: prior.runId, predecessorExecutionAttemptId: prior.executionAttemptId })
+      expect(retry.status).toBe(409); expect(retry.body.error.details.reason).toBe('ACQUISITION_PREDECESSOR_INVALID')
+      expect(await Run.countDocuments()).toBe(1); expect(responses).toHaveBeenCalledTimes(1)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    const holdPublicResponse = async () => {
+      const prepared = await preparePublicStart(), reached = deferred(), release = deferred()
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation(raw => new OriginalResponse(new ReadableStream({
+        async start(controller) {
+          reached.resolve()
+          await release.promise
+          controller.enqueue(new TextEncoder().encode(raw)); controller.close()
+        },
+      })))
+      const worker = acquire(appFor(), prepared.payload).then(value => value)
+      await Promise.race([reached.promise, worker.then(response => { throw new Error('PUBLIC worker ended before response barrier: ' + response.status) })])
+      const row = await rawPublicRun()
+      expect(row).toMatchObject({ status: 'RUNNING', publicResearch: { ledgerSequence: 1 } })
+      return { ...prepared, row, worker, responses, release: () => release.resolve() }
+    }
+    test('a concurrent in-flight original key has one Run and Attempt and refuses the second POST without IO', async () => {
+      const held = await holdPublicResponse()
+      try {
+        const duplicate = await acquire(appFor(), held.payload)
+        expect(duplicate.status).toBe(409)
+        expect(duplicate.body.error.details.reason).toBe('ACQUISITION_RUN_IN_PROGRESS')
+        expect(await Run.countDocuments()).toBe(1)
+        expect(await rawPublicRun()).toMatchObject({ runId: held.row.runId, executionAttemptId: held.row.executionAttemptId,
+          status: 'RUNNING', publicResearch: { ledgerSequence: 1 } })
+        expect(held.responses).toHaveBeenCalledTimes(1)
+        held.release()
+        const completed = await held.worker
+        expect([completed.status, completed.body.error]).toEqual([200, undefined])
+        expect(completed.body.data.acquisitionRun).toMatchObject({ runId: held.row.runId,
+          executionAttemptId: held.row.executionAttemptId, status: 'SUCCEEDED', canonicalSaved: true })
+        expect(await Run.countDocuments()).toBe(1); expect(held.responses).toHaveBeenCalledTimes(1)
+      } finally { held.release(); await held.worker }
+    })
+    test('cancelled PUBLIC Run fences an already dispatched late response and replays without another operation', async () => {
+      const held = await holdPublicResponse()
+      try {
+        const cancelled = await cancelRun(held.row)
+        expect([cancelled.status, cancelled.body.error]).toEqual([200, undefined])
+        expect(cancelled.body.data).toMatchObject({ status: 'CANCELLED', canonicalSaved: false,
+          cancellation: { eligible: false, workerStopConfirmed: false } })
+        const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), cancelledRow = digest(await rawPublicRun())
+        held.release()
+        const late = await held.worker
+        expect(late.status).toBe(200); expect(late.body.data.acquisitionRun).toMatchObject({ runId: held.row.runId, status: 'CANCELLED' })
+        expect(digest(await rawPublicRun())).toBe(cancelledRow)
+        expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+        expect(held.responses).toHaveBeenCalledTimes(1)
+        const replay = await acquire(appFor(), held.payload)
+        expect(replay.status).toBe(200); expect(replay.body.data.acquisitionRun).toMatchObject({ status: 'CANCELLED', replay: true })
+        expect(held.responses).toHaveBeenCalledTimes(1); expect(await Run.countDocuments()).toBe(1)
+      } finally { held.release(); await held.worker }
+    })
+    test('configuration replacement disables PUBLIC cancellation and stops the next operation after retaining the admitted response', async () => {
+      const held = await holdPublicResponse()
+      try {
+        const replacement = configurationBody(held.configuration)
+        replacement.settings.sources = ['SEARCH', 'WEBSITE']; replacement.settings.startingUrls = [fixture.sourceUrl]
+        replacement.settings.instructions = 'Changed during the already dispatched synthetic search'
+        expect((await putConfiguration(replacement)).status).toBe(200)
+        const exact = await exactTavily(held.row.runId)
+        expect(exact.status).toBe(200); expect(exact.body.data.cancellation.eligible).toBe(false)
+        const cancelled = await cancelRun(held.row)
+        expect(cancelled.status).toBe(409); expect(cancelled.body.error.details.reason).toBe('ACQUISITION_CANCELLATION_UNAVAILABLE')
+        held.release()
+        const late = await held.worker
+        expect(late.status).toBe(409); expect(late.body.error.details.reason).toBe('RESEARCH_CONFIGURATION_STALE')
+        const row = await rawPublicRun()
+        expect(row).toMatchObject({ canonicalSaved: false, status: 'PARTIALLY_SUCCEEDED', publicResearch: { ledgerSequence: 2 } })
+        expect(row.publicResearch.operations).toHaveLength(1)
+        expect(row.publicResearch.operations[0]).toMatchObject({ category: 'SEARCH', phase: 'RECORDED', outcome: 'SUCCEEDED' })
+        expect(held.responses).toHaveBeenCalledTimes(1)
+        await noCanonicalResearch()
+      } finally { held.release(); await held.worker }
+    })
+    test.each(['stored response', 'ledger hash', 'same timestamp later audit', 'query binding metadata'])('exact read fails closed for %s tampering', async kind => {
+      const { payload } = await preparePublicStart(), started = await acquire(appFor(), payload)
+      expect(started.status).toBe(200)
+      const row = await rawPublicRun(started.body.data.acquisitionRun.runId)
+      if (kind === 'stored response') await Run.collection.updateOne({ _id: row._id }, { $set: { 'publicResearch.operations.0.receipt.responseText': 'UNSIGNED_CHANGED_RESPONSE' } })
+      if (kind === 'ledger hash') await Run.collection.updateOne({ _id: row._id }, { $set: { 'publicResearch.ledgerHash': 'sha256:' + 'a'.repeat(64) } })
+      if (kind === 'query binding metadata') {
+        expect(row.publicResearch.operations[0].mapping.queryBinding.normalization).toBe('EXACT')
+        await Run.collection.updateOne({ _id: row._id }, { $set: {
+          'publicResearch.operations.0.mapping.queryBinding.normalization': 'LEADING_APPROVED_SITE_OPERATOR_REMOVED' } })
+      }
+      if (kind === 'same timestamp later audit') {
+        const old = await AuditLog.findById(row.publicResearch.ledgerAuditId)
+        const data = old.toObject(); delete data._id; delete data.__v
+        const later = new AuditLog({ ...data, ts: old.ts, diff: { ...old.diff,
+          publicResearchLedgerSequence: row.publicResearch.ledgerSequence + 1 } })
+        later.generateSignature(); await later.save()
+        expect(later.verifySignature()).toBe(true); expect(later.ts.getTime()).toBe(old.ts.getTime())
+      }
+      const response = await exactTavily(row.runId)
+      expect(response.status).toBe(503); expect(response.body.data).toBeUndefined()
+    })
+    test('PUBLIC history accepts only its correctly bound recorded marker while receipt-only qualification remains closed', async () => {
+      const { payload } = await preparePublicStart(), started = await acquire(appFor(), payload)
+      expect(started.status).toBe(200)
+      const row = await rawPublicRun(started.body.data.acquisitionRun.runId), root = await currentRoot()
+      expect(root.controlledReplayIsolation.bindingDigest).toBe(storedControlledReplayBindingDigest(shippedCatalogue.CONTROLLED_REPLAY_BINDINGS[0].binding))
+      expect((await exactTavily(row.runId)).status).toBe(200)
+      await expect(shippedCatalogue.verifyProviderFreeSearchReceiptScope({ runtimeInstance: root, actorUserId: String(ids.actor) }))
+        .rejects.toMatchObject({ status: 409, details: { reason: 'PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED' } })
+      await RuntimeInstance.collection.updateOne({ _id: ids.runtime },
+        { $set: { 'controlledReplayIsolation.bindingDigest': 'sha256:' + 'a'.repeat(64) } })
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), stored = digest(row)
+      const exact = await exactTavily(row.runId)
+      expect(exact.status).toBe(409); expect(exact.body.error.details.reason).toBe('PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED')
+      expect(exact.body.data).toBeUndefined()
+      const replay = await acquire(appFor(), payload)
+      expect(replay.status).toBe(409); expect(replay.body.error.details.reason).toBe('PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED')
+      expect(digest(await rawPublicRun(row.runId))).toBe(stored); expect(await Run.countDocuments()).toBe(1)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test('required response-audit failure leaves durable DISPATCHING, unchanged material and no automatic redispatch', async () => {
+      const { payload } = await preparePublicStart(), original = auditService.log.bind(auditService)
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation((...args) => new OriginalResponse(...args))
+      const log = jest.spyOn(auditService, 'log').mockImplementation((input, options) => {
+        if (input.diff?.publicResearchLedgerSequence === 2) throw new Error('Synthetic required response audit failure')
+        return original(input, options)
+      })
+      const result = await acquire(appFor(), payload)
+      log.mockRestore()
+      expect(result.status).toBe(503); expect(result.body.error.details.reason).toBe('ACQUISITION_OUTCOME_UNCONFIRMED')
+      const row = await rawPublicRun()
+      expect(row).toMatchObject({ status: 'RUNNING', active: true, publicResearch: { ledgerSequence: 1 } })
+      expect(row.publicResearch.operations).toHaveLength(1)
+      expect(row.publicResearch.operations[0]).toMatchObject({ category: 'SEARCH', phase: 'DISPATCHING', receipt: null })
+      expect(await AuditLog.countDocuments({ 'diff.runId': row.runId, 'diff.publicResearchLedgerSequence': 2 })).toBe(0)
+      await noCanonicalResearch()
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), originalRow = digest(row)
+      const replay = await acquire(appFor(), payload)
+      expect(replay.status).toBe(409); expect(replay.body.error.details.reason).toBe('ACQUISITION_RUN_IN_PROGRESS')
+      expect(responses).toHaveBeenCalledTimes(1); expect(digest(await rawPublicRun())).toBe(originalRow)
+      expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+    test.each(['EXACT', 'LEADING_APPROVED_SITE_OPERATOR_REMOVED'])('required terminal audit failure rolls back canonical root, V2 material and save audit after both original operations with %s query', async normalization => {
+      const { payload } = await preparePublicStart(), original = auditService.log.bind(auditService)
+      const responses = jest.spyOn(globalThis, 'Response').mockImplementation((raw, options) => {
+        if (normalization === 'EXACT') return new OriginalResponse(raw, options)
+        const body = JSON.parse(raw)
+        body.query = body.query.slice(('site:' + new URL(fixture.sourceUrl).hostname + ' ').length)
+        return new OriginalResponse(JSON.stringify(body), options)
+      })
+      const protectedCanonical = async () => {
+        const root = { ...await currentRoot() }; delete root.__v // Declared authority CAS bookkeeping, not canonical material.
+        const rows = await Promise.all([RuntimeEvidenceSource, RuntimeEvidenceObject, RuntimeStateSection, RuntimeStateMigrationReceipt,
+          RuntimeGraphSnapshot, RuntimeGraphElement, RuntimeEvidenceSnapshot].map(async model => [model.collection.name,
+          (await model.collection.find({}).sort({ _id: 1 }).toArray()).map(row => [String(row._id), digest(row)])]))
+        return { root: digest(root), collections: Object.fromEntries(rows) }
+      }
+      const before = await protectedCanonical()
+      let reachedCanonicalSave = false
+      const log = jest.spyOn(auditService, 'log').mockImplementation(async (input, options) => {
+        if (input.diff?.phase === 'SUCCEEDED' && input.diff.publicResearchPlanHash) {
+          expect(options.session.inTransaction()).toBe(true)
+          const root = await RuntimeInstance.collection.findOne({ _id: ids.runtime }, { session: options.session })
+          expect(root.stateVersion).not.toBe(state)
+          expect(await RuntimeEvidenceSource.countDocuments({ current: true }).session(options.session)).toBeGreaterThan(0)
+          expect(await RuntimeEvidenceObject.countDocuments({ current: true }).session(options.session)).toBeGreaterThan(0)
+          expect(await AuditLog.countDocuments({ action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED }).session(options.session)).toBe(1)
+          reachedCanonicalSave = true
+          throw Object.assign(new Error('Synthetic required terminal audit failure'), { status: 503, code: 'SERVICE_UNAVAILABLE',
+            details: { reason: 'SYNTHETIC_REQUIRED_TERMINAL_AUDIT_FAILURE' } })
+        }
+        return original(input, options)
+      })
+      let result
+      try { result = await acquire(appFor(), payload) } finally { log.mockRestore() }
+      expect(reachedCanonicalSave).toBe(true)
+      expect(result.status).toBe(503); expect(result.body.error.details.reason).toBe('SYNTHETIC_REQUIRED_TERMINAL_AUDIT_FAILURE')
+      expect(await protectedCanonical()).toEqual(before)
+      expect(await AuditLog.countDocuments({ action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED })).toBe(0)
+      expect(await AuditLog.countDocuments({ 'diff.phase': 'SUCCEEDED' })).toBe(0)
+      const row = await rawPublicRun()
+      expect(row).toMatchObject({ status: 'PARTIALLY_SUCCEEDED', active: false, canonicalSaved: false, publicResearch: { ledgerSequence: 4 } })
+      expect(row.publicResearch.operations.map(operation => operation.outcome)).toEqual(['SUCCEEDED', 'SUCCEEDED'])
+      expect(row.publicResearch.operations[0].mapping.queryBinding.normalization).toBe(normalization)
+      expect(responses).toHaveBeenCalledTimes(1)
+      expect(row.saveAuditId).toBeUndefined(); expect(row.outputStateVersion).toBeUndefined()
+      for (const outcome of row.outcomes) { expect(outcome.evidenceObjectCount).toBe(0); expect(outcome.sourceId).toBeUndefined() }
+      expect(await Run.countDocuments()).toBe(1)
+      const exact = await exactTavily(row.runId)
+      expect(exact.status).toBe(200); expect(exact.body.data.canonicalSaved).toBe(false)
+      await noCanonicalResearch()
+    })
+    test('a locked nonempty protected fixture is refused before admission and remains byte-for-byte unchanged', async () => {
+      const { payload } = await preparePublicStart()
+      await protectExistingMaterial()
+      await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED', lockedAt: new Date() } })
+      const before = await snapshotMaterial(), audits = await AuditLog.countDocuments(), responses = jest.spyOn(globalThis, 'Response')
+      const result = await acquire(appFor(), payload)
+      expect(result.status).toBe(409); expect(responses).not.toHaveBeenCalled()
+      expect(await Run.countDocuments()).toBe(0); expect(await snapshotMaterial()).toEqual(before)
+      expect(await AuditLog.countDocuments()).toBe(audits)
+    })
+  })
+  test('registered Trilogy fixture Start persists through the mounted action and ordinary exact/history readers', async () => {
+    const { payload } = await prepareTrilogyStart(), before = await protectedReceiptMaterial()
+    const responses = jest.spyOn(globalThis, 'Response').mockImplementation((...args) => new OriginalResponse(...args))
+    const started = await acquire(appFor(), payload)
+    expect(started.status).toBe(200)
+    const run = started.body.data.acquisitionRun
+    expect(run).toMatchObject({ contractVersion: 'provider-free-search-run.v1', status: 'SUCCEEDED', receiptRecorded: true,
+      canonicalSaved: false, providerFreeSearch: { discoveryItemCount: 1, liveExecutionEnabled: false, evidenceObjectCount: 0 } })
+    expect(await protectedReceiptMaterial()).toEqual(before)
+    const exact = await exactTavily(run.runId), history = await request(appFor()).get(`/${runtimeKey}/acquisition-runs`).query(configQuery)
+    expect(exact.status).toBe(200); expect(history.status).toBe(200)
+    expect(history.body.data.items.map(item => item.runId)).toEqual([run.runId])
+    expect(exact.body.data.providerFreeSearch.recordHash).toBe(run.providerFreeSearch.recordHash)
+    const stored = await Run.collection.findOne({ runId: run.runId })
+    expect(stored.providerFreeSearch.input.approvedTerms).toEqual(['clients'])
+    expect(responses).toHaveBeenCalledTimes(1)
+    expect(stored.providerFreeSearch.descriptor).toMatchObject({ method: 'POST', url: 'https://api.tavily.com/search' })
+    expect(stored.providerFreeSearch.input.responseText).toContain('not retrieved website content or a client fact')
+    expect(JSON.stringify(exact.body)).not.toContain('not retrieved website content or a client fact')
+    const unchanged = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const replay = await acquire(appFor(), payload)
+    expect(replay.status).toBe(200); expect(replay.body.data.acquisitionRun).toMatchObject({ runId: run.runId,
+      executionAttemptId: run.executionAttemptId, replay: true })
+    expect(await snapshotMaterial()).toEqual(unchanged); expect(await AuditLog.countDocuments()).toBe(audits)
+    expect(await Run.countDocuments()).toBe(1)
+    expect(responses).toHaveBeenCalledTimes(1)
+  })
+  test('mounted fixture Start saves actual HTTP refusal bytes and reopens the original failed receipt without dispatch', async () => {
+    const { payload } = await prepareTrilogyStart(), before = await protectedReceiptMaterial()
+    const raw = '{"error":"synthetic rate limit"}'
+    const responses = jest.spyOn(globalThis, 'Response').mockImplementation(() => new OriginalResponse(raw, { status: 429 }))
+    const started = await acquire(appFor(), payload)
+    expect(started.status).toBe(200)
+    const run = started.body.data.acquisitionRun
+    expect(run).toMatchObject({ status: 'FAILED', receiptRecorded: true, canonicalSaved: false })
+    const stored = await Run.collection.findOne({ runId: run.runId })
+    expect(stored.providerFreeSearch.input).toMatchObject({ responseText: raw, httpStatus: 429, transportOutcome: 'COMPLETE' })
+    expect(await protectedReceiptMaterial()).toEqual(before)
+    const audits = await AuditLog.countDocuments()
+    const replay = await acquire(appFor(), payload)
+    expect(replay.status).toBe(200)
+    expect(replay.body.data.acquisitionRun).toMatchObject({ runId: run.runId, executionAttemptId: run.executionAttemptId, status: 'FAILED', replay: true })
+    expect(responses).toHaveBeenCalledTimes(1)
+    expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits)
+    expect((await exactTavily(run.runId)).status).toBe(200)
+  })
+  test('mounted fixture transport IO refusal saves no invented HTTP receipt or protected material', async () => {
+    const { payload } = await prepareTrilogyStart(), before = await snapshotMaterial()
+    jest.spyOn(globalThis, 'Response').mockImplementation(() => { throw new Error('SYNTHETIC_SECRET_SENTINEL') })
+    const started = await acquire(appFor(), payload)
+    expect(started.status).toBe(409)
+    expect(started.body.error.details.reason).toBe('PROVIDER_FREE_SEARCH_TRANSPORT_INVALID')
+    expect(JSON.stringify(started.body)).not.toContain('SYNTHETIC_SECRET_SENTINEL')
+    expect(await Run.countDocuments()).toBe(0); expect(await snapshotMaterial()).toEqual(before)
+  })
+  test('registered fixture original request replays after configuration replacement and lock without writes', async () => {
+    const { payload, configuration } = await prepareTrilogyStart(), first = await acquire(appFor(), payload)
+    expect(first.status).toBe(200)
+    const changed = configurationBody(configuration); changed.settings.instructions = 'Different saved synthetic settings'
+    expect((await putConfiguration(changed)).status).toBe(200)
+    await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED', lockedAt: new Date() } })
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const replay = await acquire(appFor(), payload)
+    expect(replay.status).toBe(200); expect(replay.body.data.acquisitionRun).toMatchObject({
+      runId: first.body.data.acquisitionRun.runId, replay: true })
+    expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    const refused = await acquire(appFor(), { ...payload, requestKey: randomUUID() })
+    expect(refused.status).toBe(409); expect(await snapshotMaterial()).toEqual(before)
+    expect(await AuditLog.countDocuments()).toBe(audits); expect(await Run.countDocuments()).toBe(1)
+  })
+  test('registered fixture availability and new dispatch both refuse a disabled renderer action', async () => {
+    const { payload } = await prepareTrilogyStart(); projectedBuildEnabled = false
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const availability = await readConfiguration()
+    expect(availability.status).toBe(200); expect(availability.body.data.availability.fixtureStart.eligible).toBe(false)
+    const refused = await acquire(appFor(), payload)
+    expect(refused.status).toBe(409); expect(refused.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits)
+    expect(await Run.countDocuments()).toBe(0)
+  })
+  test.each(['asset', 'selector', 'foreign actor', 'view only', 'mixed raw body'])('registered fixture refuses %s without saved material changes', async kind => {
+    const { payload } = await prepareTrilogyStart(), before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    let app = appFor(), status = 409
+    if (kind === 'asset') payload.providerFreeSearch.fixtureFileSha256 = 'a'.repeat(64)
+    if (kind === 'selector') payload.researchConfiguration.configurationHash = 'sha256:' + 'a'.repeat(64)
+    if (kind === 'foreign actor') app = appFor(scopes(), 'aaaaaaaaaaaaaaaaaaaaaaaa')
+    if (kind === 'view only') { app = appFor(scopes(['VMF_VIEW'])); status = 403 }
+    if (kind === 'mixed raw body') { payload.responseText = '{}'; status = 422 }
+    const refused = await acquire(app, payload)
+    expect(refused.status).toBe(status)
+    if (kind === 'foreign actor') expect(refused.body.error.details.reason).toBe('PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED')
+    expect(await snapshotMaterial()).toEqual(before)
+    expect(await AuditLog.countDocuments()).toBe(audits); expect(await Run.countDocuments()).toBe(0)
+  })
+
+  test('Tavily receipt uses actual independent qualification, existing Run/Attempt and three signed phases without evidence writes', async () => {
+    const { payload } = await prepareTavilyReceipt(), before = await protectedReceiptMaterial(), audits = await AuditLog.countDocuments()
+    const result = await recordTavily(payload)
+    expect(result).toMatchObject({ contractVersion: 'provider-free-search-run.v1', status: 'SUCCEEDED', receiptRecorded: true, canonicalSaved: false,
+      providerFreeSearch: { classification: 'LOCAL_SYNTHETIC_RECEIPT_ONLY', provider: 'TAVILY_SEARCH', liveExecutionEnabled: false,
+        discoveryItemCount: 1, evidenceObjectCount: 0 } })
+    expect(result.outcomes).toEqual([{ kind: 'SEARCH', inputIndex: 0, status: 'SUCCEEDED', evidenceObjectCount: 0 }])
+    expect(result.outputStateVersion).toBeUndefined(); expect(result.cancellation).toBeUndefined()
+    expect(await protectedReceiptMaterial()).toEqual(before)
+    expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits + 3)
+    for (const audit of await AuditLog.find()) expect(audit.verifySignature()).toBe(true)
+    expect((await Run.findOne({ runId: result.runId }).lean()).providerFreeSearch).toBeUndefined()
+    const stored = await Run.collection.findOne({ runId: result.runId })
+    expect(stored.providerFreeSearch.input.responseText).toBe(payload.fixture.responseText)
+    expect(stored.providerFreeSearch.rawResponseHash).toBe('sha256:' + createHash('sha256').update(payload.fixture.responseText).digest('hex'))
+    const exact = await exactTavily(result.runId); expect(exact.status).toBe(200)
+    expect(exact.body.data.providerFreeSearch.recordHash).toBe(result.providerFreeSearch.recordHash)
+    expect(JSON.stringify(exact.body)).not.toContain(tavilyResponses.providerShapes.tavily.results[0].content)
+    expect(exact.body.data.providerFreeSearch.input).toBeUndefined()
+    const history = await request(appFor()).get(`/${runtimeKey}/acquisition-runs`).query(configQuery)
+    expect(history.status).toBe(200); expect(history.body.data.items[0].providerFreeSearch.recordHash).toBe(result.providerFreeSearch.recordHash)
+    expect(history.body.data.items[0].researchConfiguration.settings).toBeUndefined()
+    expect((await readConfiguration()).body.data.availability.canStart).toBe(false)
+  })
+  test.each(['malformed', 'identity mismatch', 'empty', 'partial', 'rate limited', 'timeout'])('Tavily %s records its bounded private response and truthful terminal receipt', async kind => {
+    const { payload } = await prepareTavilyReceipt(), body = JSON.parse(payload.fixture.responseText)
+    if (kind === 'malformed') payload.fixture.responseText = '{SYNTHETIC_PRIVATE_FAILURE'
+    if (kind === 'identity mismatch') { body.query = 'site:foreign.example'; payload.fixture.responseText = JSON.stringify(body) }
+    if (kind === 'empty') { body.results = []; payload.fixture.responseText = JSON.stringify(body) }
+    if (kind === 'partial') payload.fixture.transportOutcome = 'PARTIAL'
+    if (kind === 'rate limited') { payload.fixture.httpStatus = 429; payload.fixture.responseText = '{SYNTHETIC_PRIVATE_FAILURE' }
+    if (kind === 'timeout') { payload.fixture.transportOutcome = 'TIMEOUT'; payload.fixture.httpStatus = null; payload.fixture.responseText = '' }
+    const before = await protectedReceiptMaterial(), result = await recordTavily(payload)
+    expect(result.status).toBe(kind === 'empty' ? 'SUCCEEDED' : kind === 'partial' ? 'PARTIALLY_SUCCEEDED' : 'FAILED')
+    expect(result).toMatchObject({ receiptRecorded: true, canonicalSaved: false })
+    const stored = await Run.collection.findOne({ runId: result.runId })
+    expect(stored.providerFreeSearch.input.responseText).toBe(payload.fixture.responseText)
+    expect(stored.providerFreeSearch.adaptationStatus).toBe(['malformed', 'identity mismatch'].includes(kind) ? 'INVALID_RESPONSE' : 'VALID')
+    const read = await exactTavily(result.runId); expect(read.status).toBe(200)
+    expect(JSON.stringify(read.body)).not.toContain('SYNTHETIC_PRIVATE_FAILURE')
+    expect(await protectedReceiptMaterial()).toEqual(before)
+  })
+  test('Tavily same-key replay after a signed configuration replacement and lock has no writes or new attempt', async () => {
+    const { payload, configuration } = await prepareTavilyReceipt(), original = await recordTavily(payload)
+    const changed = configurationBody(configuration); changed.settings.sources = ['SEARCH']; changed.settings.instructions = 'Replacement synthetic scope'
+    expect((await putConfiguration(changed)).status).toBe(200)
+    await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED', lockedAt: new Date() } })
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const replay = await recordTavily(payload)
+    expect(replay).toMatchObject({ replay: true, runId: original.runId, executionAttemptId: original.executionAttemptId })
+    expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits); expect(await Run.countDocuments()).toBe(1)
+    const read = await exactTavily(original.runId); expect(read.status).toBe(200)
+  })
+  test('Tavily changed same-key material conflicts and concurrent identical commands keep one Run/Attempt', async () => {
+    const { payload } = await prepareTavilyReceipt(), audits = await AuditLog.countDocuments()
+    const results = await Promise.all([recordTavily(payload), recordTavily(payload)])
+    expect(results[0].runId).toBe(results[1].runId); expect(results[0].executionAttemptId).toBe(results[1].executionAttemptId)
+    expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits + 3)
+    const before = await snapshotMaterial()
+    await expect(recordTavily({ ...payload, fixture: { ...payload.fixture, responseText: payload.fixture.responseText + ' ' } })).rejects.toMatchObject({ status: 409 })
+    expect(await snapshotMaterial()).toEqual(before)
+  })
+  test('Tavily explicit predecessor Run/Attempt creates a separate retry receipt and replays without changing its failed predecessor', async () => {
+    const { payload } = await prepareTavilyReceipt(), originalPayload = { ...payload, fixture: { ...payload.fixture, httpStatus: 429, responseText: '' } }
+    const failed = await recordTavily(originalPayload), original = await Run.collection.findOne({ runId: failed.runId })
+    const retryPayload = { ...payload, requestKey: randomUUID(), predecessorRunId: failed.runId, predecessorExecutionAttemptId: failed.executionAttemptId }
+    const result = await recordTavily(retryPayload)
+    expect(result).toMatchObject({ status: 'SUCCEEDED', predecessorRunId: failed.runId, predecessorExecutionAttemptId: failed.executionAttemptId })
+    expect(result.runId).not.toBe(failed.runId); expect(result.executionAttemptId).not.toBe(failed.executionAttemptId)
+    expect(await Run.collection.findOne({ runId: failed.runId })).toEqual(original)
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    expect(await recordTavily(retryPayload)).toMatchObject({ replay: true, runId: result.runId, executionAttemptId: result.executionAttemptId })
+    expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits); expect(await Run.countDocuments()).toBe(2)
+  })
+  test.each(['missing attempt', 'wrong attempt', 'other Run', 'changed scope', 'successful predecessor'])('Tavily retry refuses %s without admitting another receipt', async kind => {
+    const { payload } = await prepareTavilyReceipt()
+    const predecessor = await recordTavily(kind === 'successful predecessor' ? payload : { ...payload, fixture: { ...payload.fixture, httpStatus: 429, responseText: '' } })
+    const retry = { ...payload, requestKey: randomUUID(), predecessorRunId: predecessor.runId, predecessorExecutionAttemptId: predecessor.executionAttemptId }
+    if (kind === 'missing attempt') delete retry.predecessorExecutionAttemptId
+    if (kind === 'wrong attempt') retry.predecessorExecutionAttemptId = randomUUID()
+    if (kind === 'other Run') retry.predecessorRunId = randomUUID()
+    if (kind === 'changed scope') retry.fixture = { ...retry.fixture, approvedTerms: ['different terms'] }
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    await expect(recordTavily(retry)).rejects.toMatchObject({ status: kind === 'missing attempt' ? 422 : 409 })
+    expect(await snapshotMaterial()).toEqual(before); expect(await AuditLog.countDocuments()).toBe(audits); expect(await Run.countDocuments()).toBe(1)
+  })
+  test.each(['QUEUED', 'RUNNING', 'SUCCEEDED'])('Tavily required %s audit failure rolls back receipt and all version fences', async phase => {
+    const { payload } = await prepareTavilyReceipt(), before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const log = auditService.log.bind(auditService)
+    const spy = jest.spyOn(auditService, 'log').mockImplementation((input, options) => {
+      if (input.action === 'RUNTIME_ACQUISITION_RECORDED' && input.diff.phase === phase) throw new Error('Synthetic required audit unavailable')
+      return log(input, options)
+    })
+    try { await expect(recordTavily(payload)).rejects.toMatchObject({ status: 503, details: { reason: 'PROVIDER_FREE_SEARCH_RECORD_UNAVAILABLE' } }) } finally { spy.mockRestore() }
+    expect(await Run.countDocuments()).toBe(0); expect(await AuditLog.countDocuments()).toBe(audits); expect(await snapshotMaterial()).toEqual(before)
+  })
+  test.each(['raw', 'mapped', 'configuration', 'admission audit', 'start audit', 'terminal audit', 'retry pair'])('Tavily exact read refuses tampered %s rather than returning empty success', async kind => {
+    const { payload } = await prepareTavilyReceipt(), result = await recordTavily(payload), row = await Run.collection.findOne({ runId: result.runId })
+    if (kind === 'raw') await Run.collection.updateOne({ _id: row._id }, { $set: { 'providerFreeSearch.input.responseText': row.providerFreeSearch.input.responseText + ' ' } })
+    if (kind === 'mapped') await Run.collection.updateOne({ _id: row._id }, { $set: { 'providerFreeSearch.mapped.normalized.discoveryItems.0.snippet': 'Changed synthetic claim' } })
+    if (kind === 'configuration') await Run.collection.updateOne({ _id: row._id }, { $unset: { researchConfiguration: '' } })
+    if (kind === 'retry pair') await Run.collection.updateOne({ _id: row._id }, { $set: { predecessorRunId: randomUUID(), predecessorExecutionAttemptId: randomUUID() } })
+    for (const [label, key] of [['admission audit', 'admissionAuditId'], ['start audit', 'startAuditId'], ['terminal audit', 'terminalAuditId']]) {
+      if (kind === label) await AuditLog.collection.updateOne({ _id: row[key] }, { $set: { 'diff.providerFreeSearch.recordHash': 'sha256:' + 'f'.repeat(64) } })
+    }
+    const read = await exactTavily(result.runId); expect(read.status).toBe(503); expect(read.body.data).toBeUndefined()
+    expect(read.body.error.details.reason).toBe(['raw', 'mapped'].includes(kind)
+      ? 'PROVIDER_FREE_SEARCH_RECEIPT_UNVERIFIED' : 'ACQUISITION_RECEIPT_UNVERIFIED')
+  })
+  test.each(['locked', 'stale time', 'stale selector', 'read only', 'foreign scope', 'shared actor', 'inactive role', 'controlled marker'])('Tavily refuses %s before receipt admission', async kind => {
+    const { payload } = await prepareTavilyReceipt(), extra = {}
+    if (kind === 'locked') await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED' } })
+    if (kind === 'stale time') payload.expectedUpdatedAt = '2026-11-10T10:00:00.000Z'
+    if (kind === 'stale selector') payload.fixture.selector.configurationHash = 'sha256:' + 'f'.repeat(64)
+    if (kind === 'read only') extra.scopes = scopes(['VMF_VIEW'])
+    if (kind === 'foreign scope') extra.scopes = { ...scopes(), tenant: { _id: 'f'.repeat(24), customerId: String(ids.customer) } }
+    if (kind === 'shared actor') await User.collection.updateOne({ _id: ids.actor }, { $push: { tenantMemberships: { customerId: ids.customer, tenantId: new mongoose.Types.ObjectId('e'.repeat(24)), roles: ['LOCAL_RESEARCH_OPERATOR'] } } })
+    if (kind === 'inactive role') await Role.collection.updateOne({}, { $set: { isActive: false } })
+    if (kind === 'controlled marker') await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { controlledReplayIsolation: { classification: 'UNVERIFIED_MARKER' } } })
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const expected = kind === 'read only' ? [403, 'FORBIDDEN'] : kind === 'foreign scope' ? [404, 'RUNTIME_INSTANCE_NOT_FOUND']
+      : ['shared actor', 'inactive role', 'controlled marker'].includes(kind) ? [409, 'PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED']
+        : [409, 'PROVIDER_FREE_SEARCH_BASIS_STALE']
+    await expect(recordTavily(payload, extra)).rejects.toMatchObject({ status: expected[0], details: { reason: expected[1] } })
+    expect(await Run.countDocuments()).toBe(0); expect(await AuditLog.countDocuments()).toBe(audits); expect(await snapshotMaterial()).toEqual(before)
+  })
+  test.each(['actor', 'role', 'customer', 'tenant'])('Tavily rejected native %s dependency fails record and mounted read closed', async kind => {
+    const { payload } = await prepareTavilyReceipt(), result = await recordTavily(payload)
+    const model = { actor: User, role: Role, customer: Customer, tenant: Tenant }[kind], method = kind === 'role' ? 'find' : 'findById'
+    const original = model[method].bind(model), before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    const spy = jest.spyOn(model, method).mockImplementation((...args) => {
+      const query = original(...args); query.lean = async () => { throw new Error('Synthetic native dependency unavailable') }; return query
+    })
+    try {
+      await expect(recordTavily({ ...payload, requestKey: randomUUID() })).rejects.toMatchObject({ status: 503, details: { reason: 'PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED' } })
+      const read = await exactTavily(result.runId); expect(read.status).toBe(503); expect(read.body.data).toBeUndefined()
+      expect(read.body.error.details.reason).toBe('PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED')
+    } finally { spy.mockRestore() }
+    expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits); expect(await snapshotMaterial()).toEqual(before)
+  })
+  test('Tavily queued insertion shares the existing active-acquisition uniqueness fence', async () => {
+    const { payload } = await prepareTavilyReceipt(), runtime = await currentRoot()
+    const context = await actualAcquisition.lookupAcquisitionRequest({ runtimeInstance: runtime, actorUserId: String(ids.actor),
+      actionKey: 'SAVE_DISCOVERY_INPUTS', payload: { requestKey: randomUUID(), expectedUpdatedAt: at, inputs: {} } })
+    await actualAcquisition.startAcquisitionRun(context, {})
+    const before = await snapshotMaterial(), audits = await AuditLog.countDocuments()
+    await expect(recordTavily(payload)).rejects.toMatchObject({ status: 409, details: { reason: 'ACQUISITION_RUN_IN_PROGRESS' } })
+    expect(await Run.countDocuments()).toBe(1); expect(await AuditLog.countDocuments()).toBe(audits); expect(await snapshotMaterial()).toEqual(before)
+  })
+  test.each(['lock first', 'receipt first', 'role revocation first'])('Tavily real transaction linearises %s without changing protected evidence', async order => {
+    const { payload } = await prepareTavilyReceipt(), materialBefore = await protectedReceiptMaterial()
+    let release, entered, pauseTimer
+    const wait = new Promise(resolve => { release = resolve }), seen = new Promise(resolve => { entered = resolve })
+    let paused = false, spy
+    if (order === 'receipt first') {
+      const log = auditService.log.bind(auditService)
+      spy = jest.spyOn(auditService, 'log').mockImplementation(async (input, options) => {
+        if (!paused && input.action === 'RUNTIME_ACQUISITION_RECORDED' && input.diff.phase === 'QUEUED') { paused = true; entered(); await wait }
+        return log(input, options)
+      })
+    } else {
+      const collection = order === 'lock first' ? RuntimeInstance.collection : Role.collection, update = collection.updateOne.bind(collection)
+      spy = jest.spyOn(collection, 'updateOne').mockImplementation(async (...args) => {
+        if (!paused && args[1]?.$inc?.__v === 1) { paused = true; entered(); await wait }
+        return update(...args)
+      })
+    }
+    const recording = recordTavily(payload).then(value => ({ value }), error => ({ error }))
+    let competing
+    try {
+      await Promise.race([seen, new Promise((_, reject) => { pauseTimer = setTimeout(() => reject(new Error('Synthetic overlap pause was not reached')), 10000) })])
+      clearTimeout(pauseTimer)
+      if (order === 'role revocation first') {
+        await Role.collection.updateOne({}, { $set: { isActive: false } })
+      } else {
+        competing = RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'LOCKED', lockedAt: new Date(at) } })
+        if (order === 'lock first') await competing
+      }
+      release()
+      const outcome = await recording
+      if (competing) await competing
+      if (order === 'receipt first') {
+        expect(outcome.value).toMatchObject({ status: 'SUCCEEDED', receiptRecorded: true, canonicalSaved: false })
+        expect(await Run.countDocuments()).toBe(1)
+      } else {
+        expect(outcome.error).toMatchObject({ status: 409, details: { reason: order === 'lock first'
+          ? 'PROVIDER_FREE_SEARCH_BASIS_STALE' : 'PROVIDER_FREE_SEARCH_SCOPE_UNVERIFIED' } }); expect(await Run.countDocuments()).toBe(0)
+      }
+      // The competing lifecycle/role change is the only material change allowed.
+      if (order === 'role revocation first') await Role.collection.updateOne({}, { $set: { isActive: true } })
+      else await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { status: 'ACTIVE' }, $unset: { lockedAt: '' } })
+      expect(await protectedReceiptMaterial()).toEqual(materialBefore)
+    } finally { clearTimeout(pauseTimer); release(); await recording; spy.mockRestore() }
+  }, 30000)
+
   test('the real local registration verifies native authority/exclusions and persists a qualified research Run', async () => {
     const { payload, entry } = await prepareNativeLocalRegistration()
     await RuntimeInstance.collection.updateOne({ _id: ids.runtime }, { $set: { 'revision.rootRuntimeInstanceKey': entry.binding.revisionId } })
@@ -342,6 +1330,7 @@ isolated('provider-free acquisition through real persistence and ordinary reader
     const { payload } = await prepareResearchDispatch(), before = await snapshotMaterial(), children = []
     const launch = mode => {
       const child = spawn(process.execPath, ['--experimental-vm-modules', fileURLToPath(new URL('../../node_modules/jest/bin/jest.js', import.meta.url)),
+        '--config', process.env.VMF_CONTROLLED_REPLAY_JEST_CONFIG || fileURLToPath(new URL('../../package.json', import.meta.url)),
         '--runInBand', '--runTestsByPath', fileURLToPath(import.meta.url), '--testNamePattern', '^owned interrupted worker child '], {
         cwd: process.cwd(), env: { ...process.env, VMF_CONTROLLED_REPLAY_CHILD_MODE: mode,
           VMF_CONTROLLED_REPLAY_CHILD_OWNED_URI: replica.getUri(database), VMF_CONTROLLED_REPLAY_CHILD_PAYLOAD: JSON.stringify(payload) },

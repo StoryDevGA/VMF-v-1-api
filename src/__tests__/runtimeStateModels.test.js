@@ -129,6 +129,22 @@ const validDocuments = () => ({
   }),
 })
 
+test('evidence decision metadata is optional for legacy rows and preserves a recorded reason and reviewer', () => {
+  const row = validDocuments().evidenceObject
+  expect(row.reviewRationale).toBeUndefined()
+  expect(row.acceptedBy).toBeUndefined()
+  row.set({ reviewRationale: 'The original passage supports this first-party assertion.',
+    acceptedBy: objectId.toString(), acceptanceTimestamp: '2026-11-17T16:00:00.000Z' })
+  expect(row.validateSync()).toBeUndefined()
+  expect(row.reviewRationale).toBe('The original passage supports this first-party assertion.')
+})
+
+test.each(['short', 'x'.repeat(2001)])('evidence model refuses an out-of-bounds decision rationale', rationale => {
+  const row = validDocuments().evidenceObject
+  row.reviewRationale = rationale
+  expect(row.validateSync()?.errors.reviewRationale).toBeDefined()
+})
+
 const expectInvalid = (document, path) => {
   const error = document.validateSync()
   expect(error).toBeDefined()
@@ -179,7 +195,8 @@ describe('Runtime State Storage V2 physical foundations', () => {
     expect(schema.path('tenantId').options.required).toBe(true)
     expect(schema.path('stateVersion').options.required).toBe(true)
     expect(schema.path('sourceStateVersion').options.required).toBe(true)
-    expect(schema.path('migrationReceiptId').options.required).toBe(true)
+    const receiptRequired = schema.path('migrationReceiptId').options.required
+    expect(typeof receiptRequired === 'function' ? receiptRequired.call({}) : receiptRequired).toBe(true)
     expect(schema.path('current').options.default).toBe(false)
     expect(schema.path('isCurrent')).toBeUndefined()
     expect(indexNames(schema)).toEqual([

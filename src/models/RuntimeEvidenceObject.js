@@ -139,6 +139,11 @@ const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
       maxlength: 80,
       default: '',
     },
+    reviewRationale: { type: String, trim: true, minlength: 10, maxlength: 2000, default: undefined },
+    acceptedBy: { type: String, trim: true, maxlength: 160, default: undefined },
+    acceptanceTimestamp: { type: String, trim: true, maxlength: 100, default: undefined },
+    rejectedBy: { type: String, trim: true, maxlength: 160, default: undefined },
+    rejectionTimestamp: { type: String, trim: true, maxlength: 100, default: undefined },
     acceptanceState: {
       type: String,
       trim: true,

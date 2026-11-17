@@ -1,5 +1,9 @@
-import { CONTROLLED_REPLAY_BINDINGS } from '../constants/controlledReplayBindings.js'
-import { resolveControlledReplayAcquisition, assertControlledReplayCurrent } from './controlledReplayAcquisitionService.js'
+import { CONTROLLED_REPLAY_BINDINGS, verifyProviderFreeSearchReceiptScope } from '../constants/controlledReplayBindings.js'
+import { resolveControlledReplayAcquisition, assertControlledReplayCurrent, PROVIDER_FREE_SEARCH_FIXTURE,
+  loadProviderFreeSearchFixture, PUBLIC_RESEARCH_FIXTURE, assertPublicResearchFixtureExecution } from './controlledReplayAcquisitionService.js'
+import { resolvePublicResearchExecution } from './publicResearchOrchestrationService.js'
+import { readPublicResearchOperatingPolicy } from '../config/publicResearchProvider.js'
+import { assertProviderFreeSearchStartAction } from './runtimeActionExecutionService.js'
 import { randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import RuntimeInstance from '../models/RuntimeInstance.js'
@@ -31,7 +35,7 @@ const inTransaction = async work => {
 const load = async (args, session) => {
   const runtime = await getRuntimeInstance({ scopes: args.scopes, runtimeInstanceId: args.runtimeInstanceId, session,
     maxTimeMS: 2000, metadataMaxTimeMS: 2000,
-    projection: 'customerId tenantId runtimeInstanceKey runtimeType revision stateVersion runtimeStateVersion updatedAt status executionStatus lockedAt framework_state.lock framework_state.publish framework_state.lifecycle controlledReplayIsolation',
+    projection: 'customerId tenantId runtimeInstanceKey runtimeType revision stateVersion runtimeStateVersion updatedAt status executionStatus lockedAt framework_state.lock framework_state.publish framework_state.lifecycle framework_state.evidence_pack.sourceRegistry framework_state.evidence_pack.evidenceObjects controlledReplayIsolation',
   })
   // Read the private path only after ordinary scoped runtime authorization.
   const row = await RuntimeInstance.findOne({ _id: runtime.id, customerId: runtime.customerId, tenantId: runtime.tenantId })
@@ -51,10 +55,32 @@ const load = async (args, session) => {
   }
   return { runtime, configuration }
 }
+// The receipt owner shares this exact signed, session-bound read. It grants no execution.
+export const loadResearchConfigurationForReceipt = (args, session) => load(args, session)
 const fixtureStartFor = async ({ runtime, configuration, basis, canEdit, currency }, args, session) => {
   const unavailable = reason => ({ contractVersion: 'controlled-fixture-start.v1', eligible: false, reason })
   if (!configuration || !canEdit || currency !== 'CURRENT_BASIS') return unavailable('BASIS_UNAVAILABLE')
   const settings = configuration.settings
+  if (settings.sources.length === 1 && settings.sources[0] === 'SEARCH') {
+    const unavailableSearch = reason => ({ contractVersion: 'provider-free-search-start.v1', eligible: false, reason })
+    if (settings.startingUrls.length !== 1 || settings.startingUrls[0] !== PROVIDER_FREE_SEARCH_FIXTURE.targetUrl)
+      return unavailableSearch('SETTINGS_UNSUPPORTED')
+    try {
+      await assertRuntimePermission({ actorUserId: args.actorUserId, scopes: args.scopes, customerId: runtime.customerId,
+        tenantId: runtime.tenantId, permission: 'VMF_UPDATE', session, maxTimeMS: 2000 })
+      await verifyProviderFreeSearchReceiptScope({ runtimeInstance: runtime, actorUserId: args.actorUserId, session })
+      await loadProviderFreeSearchFixture()
+      await assertProviderFreeSearchStartAction(args)
+    } catch (error) {
+      if ([403, 404, 409, 422].includes(error.status)) return unavailableSearch(error.details?.reason || 'ACTION_UNAVAILABLE')
+      throw error
+    }
+    return { contractVersion: 'provider-free-search-start.v1', eligible: true, classification: 'LOCAL_SYNTHETIC_RECEIPT_ONLY',
+      provider: 'TAVILY_SEARCH', receiptOnly: true, liveExecutionEnabled: false,
+      actorUserId: String(args.actorUserId), scope: scopeFor(runtime), basis, fixture: PROVIDER_FREE_SEARCH_FIXTURE,
+      selector: { configurationVersion: configuration.configurationVersion, configurationHash: configuration.configurationHash,
+        basisStateVersion: basis.stateVersion } }
+  }
   if (settings.sources.length !== 1 || settings.sources[0] !== 'WEBSITE' || settings.startingUrls.length !== 1)
     return unavailable('SETTINGS_UNSUPPORTED')
   const candidates = CONTROLLED_REPLAY_BINDINGS.filter(entry => {
@@ -83,12 +109,49 @@ const fixtureStartFor = async ({ runtime, configuration, basis, canEdit, currenc
     selector: { configurationVersion: configuration.configurationVersion, configurationHash: configuration.configurationHash,
       basisStateVersion: basis.stateVersion } }
 }
+const researchStartFor = async ({ runtime, configuration, basis, canEdit, currency }, args, session) => {
+  const blocked = reason => ({ contractVersion: 'public-research-start.v1', eligible: false,
+    mode: 'LIVE', liveExecutionEnabled: false, reason })
+  if (!configuration || !canEdit || currency !== 'CURRENT_BASIS') return blocked('BASIS_UNAVAILABLE')
+  const selector = { configurationVersion: configuration.configurationVersion, configurationHash: configuration.configurationHash,
+    basisStateVersion: basis.stateVersion }
+  const offline = configuration.settings.sources.length === 2 && ['SEARCH', 'WEBSITE'].every(key => configuration.settings.sources.includes(key))
+    && configuration.settings.startingUrls.length === 1 && configuration.settings.startingUrls[0] === 'https://controlled-context.example/case-study'
+  try {
+    await assertRuntimePermission({ actorUserId: args.actorUserId, scopes: args.scopes, customerId: runtime.customerId,
+      tenantId: runtime.tenantId, permission: 'VMF_UPDATE', session, maxTimeMS: 2000 })
+    await assertProviderFreeSearchStartAction(args)
+    if (offline) {
+      const payload = { controlledReplay: { bindingId: PUBLIC_RESEARCH_FIXTURE.controlledBindingId }, expectedUpdatedAt: basis.updatedAt,
+        acquisitionProfile: configuration.coverage }
+      const controlledContext = await resolveControlledReplayAcquisition({ payload, runtimeInstance: runtime, actorUserId: args.actorUserId,
+        actionKey: 'BUILD_EVIDENCE_PACK', session })
+      await assertPublicResearchFixtureExecution({ configuration, runtimeInstance: runtime, actorUserId: args.actorUserId, controlledContext, payload, session })
+    } else {
+      const policy = readPublicResearchOperatingPolicy()
+      if (!policy) return blocked('OPERATING_APPROVAL_NOT_RECORDED')
+      await resolvePublicResearchExecution({ configuration, runtimeInstance: runtime, actorUserId: args.actorUserId, session,
+        payload: { requestKey: policy.releaseId, expectedUpdatedAt: basis.updatedAt, researchConfiguration: selector,
+          publicResearch: { mode: 'LIVE', releaseId: policy.releaseId } } })
+      return { contractVersion: 'public-research-start.v1', eligible: true, mode: 'LIVE', liveExecutionEnabled: true,
+        classification: 'NATIVE_PUBLIC_RESEARCH', actorUserId: String(args.actorUserId), scope: scopeFor(runtime), basis, selector, requestKey: policy.releaseId }
+    }
+    return { contractVersion: 'public-research-start.v1', eligible: true, mode: 'OFFLINE', liveExecutionEnabled: false,
+      classification: 'CONTROLLED_PROVIDER_FREE_RESEARCH', actorUserId: String(args.actorUserId), scope: scopeFor(runtime), basis,
+      selector, requestKey: null, fixture: PUBLIC_RESEARCH_FIXTURE }
+  } catch (error) {
+    if ([403, 404, 409, 422].includes(error.status)) return blocked(error.details?.reason || 'ACTION_UNAVAILABLE')
+    throw error
+  }
+}
 const view = async ({ runtime, configuration }, args, session) => {
   const basis = basisFor(runtime), canEdit = editable(runtime), currency = !configuration ? 'NOT_RECORDED'
     : configuration.basisStateVersion === basis.stateVersion && configuration.basisUpdatedAt === basis.updatedAt ? 'CURRENT_BASIS' : 'STALE_BASIS'
+  const context = { runtime, configuration, basis, canEdit, currency }
+  const fixtureStart = await fixtureStartFor(context, args, session)
   return { contractVersion: 'public-research-configuration-read.v1', scope: scopeFor(runtime), basis, configuration,
     editable: canEdit, currency, availability: { ...researchAvailability({ configuration, basis, editable: canEdit, currency }),
-      fixtureStart: await fixtureStartFor({ runtime, configuration, basis, canEdit, currency }, args, session) } }
+      fixtureStart, ...(!fixtureStart.eligible ? { researchStart: await researchStartFor(context, args, session) } : {}) } }
 }
 export const getResearchConfiguration = args => inTransaction(async session => view(await load(args, session), args, session))
 
